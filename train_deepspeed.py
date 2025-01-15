@@ -5,20 +5,16 @@ import json
 import logging
 import pathlib
 from typing import Dict, Optional, Sequence, List
-
 import torch
-
 import transformers
 import tokenizers
-
-
 
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="/dev/shm/chaofeng/llava-v1.6-mistral-7b")
     version: Optional[str] = field(default="mistral_instruct")
     freeze_backbone: bool = field(default=False)
-    tune_mm_mlp_adapter: bool = field(default=False)
+    tune_mm_mlp_adapter: bool = field(default=True)
     vision_tower: Optional[str] = field(default='openai/clip-vit-large-patch14')
     mm_vision_select_layer: Optional[int] = field(default=-2)   # default to the last layer
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
@@ -27,10 +23,6 @@ class ModelArguments:
     mm_use_im_patch_token: bool = field(default=True)
     mm_patch_merge_type: Optional[str] = field(default='flat')
     mm_vision_select_feature: Optional[str] = field(default="patch")
-
-
-    # modfied
-
 
 
 @dataclass
@@ -182,9 +174,29 @@ if __name__ == '__main__':
     model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
     model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
-    # build dataset
+    # build trian dataset, collect_fun, val dataset
     from train.dataset import make_supervised_data_module
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
+
+    # transformer trainer fit
+    from train.llava_trainer import LLaVATrainer
+    trainer = LLaVATrainer(model=model, args=training_args, tokenizer=tokenizer, **data_module)
+    trainer.train()
+
+    """
+    deepspeed train_full_ft.py --deepspeed /home/chaofeng/LLaVA/scripts/zero2.json
+    """
+
+    """
+    模型加载
+    数据加载
+    损失函数: 自带smoth crocess entropy损失计算
+    训练:
+        使用transformer自带训练基类进行训练， 可以使用deepspeed
+        自己撕一版torch原生的训练方式
+    """
+
+
 
 
 

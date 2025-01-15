@@ -30,7 +30,15 @@ except:
 
 
 
-def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
+def load_pretrained_model(model_path, # lora or pretrain dir?
+                          model_base, # pretrain dir if set lora model in model_path
+                          model_name, 
+                          load_8bit=False, 
+                          load_4bit=False, 
+                          device_map="auto", 
+                          device="cuda", 
+                          use_flash_attn=False, 
+                          **kwargs):
     kwargs = {"device_map": device_map, **kwargs}
 
     if device != "cuda":
