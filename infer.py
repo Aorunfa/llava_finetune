@@ -24,6 +24,7 @@
 import argparse
 import torch
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 from PIL import Image
 import requests
 from PIL import Image
@@ -112,7 +113,7 @@ def infer(args, images_path, device):
         if model.config.mm_use_im_start_end:
             qs = image_token_se + "\n" + qs
         else:
-            qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
+            qs = DEFAULT_IMAGE_TOKEN + "\n" + qs # #### mistrial
 
     if "llama-2" in model_name.lower():
         conv_mode = "llava_llama_2"
@@ -126,8 +127,7 @@ def infer(args, images_path, device):
         conv_mode = "mpt"
     else:
         conv_mode = "llava_v0"
-    
-
+        
     if args.conv_mode is not None and conv_mode != args.conv_mode:
         print(
             "[WARNING] the auto inferred conversation mode is {}, while `--conv-mode` is {}, using {}".format(
@@ -169,10 +169,16 @@ def infer(args, images_path, device):
     # model_lora.to(torch.float16)
 
 
-
+    # model.config.image_aspect_ratio = 'pad'
+    
     data = read_input(images_path, image_processor, model.config)
     # images_tensor = data['images_tensor'].to(model.device, dtype=torch.float16)
     images_tensor = data['images_tensor'].to(model.device, dtype=torch.float16)
+    
+    # import time
+    # print('111111', images_tensor.shape)
+    # time.sleep(3)
+    
     image_sizes = data['image_sizes']
     image_path = data['image_path']
 
@@ -208,7 +214,6 @@ def infer(args, images_path, device):
 if __name__ == "__main__":
     ##### 预训练模型单卡推理 ###########
     ckpt = '/dev/shm/chaofeng/llava-v1.6-mistral-7b'
-    ckpt = '/home/chaofeng/llava_finetune/llava-v1.6-mistral-7b-new'
     image_file = '/home/chaofeng/BLIP/test.png'
     image_file = '/morph-chaofeng/stock/real/ice-2799109_1280.png'
     #qurey = 'describe this picture shortly.'
@@ -273,3 +278,13 @@ if __name__ == "__main__":
 
 
 
+    """
+    prompt
+    "[INST] <image>\nWhat is in this image?, the answer should starts with 'The image shows' and should less than 15 words [/INST]"
+    
+    input_ids
+    tensor([[    1,   733, 16289, 28793, 28705,  -200, 28705,    13,  3195,   349,
+           297,   456,  3469, 24542,   272,  4372,  1023,  8383,   395,   464,
+          1014,  3469,  4370, 28742,   304,  1023,  2108,   821, 28705, 28740,
+         28782,  3085,   733, 28748, 16289, 28793]], device='cuda:0')
+    """

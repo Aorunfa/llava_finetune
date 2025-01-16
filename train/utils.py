@@ -21,7 +21,7 @@ def save_metric(data:dict, save_csv):
         if isinstance(data, dict):
             data = pd.DataFrame(data, index=[0])
         data.to_csv(file,
-                    sep='\t',
+                    #sep='\t',
                     index=False,
                     header=not os.stat(save_csv).st_size > 0)
 

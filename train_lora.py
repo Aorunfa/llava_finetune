@@ -22,9 +22,11 @@ from train.utils import (
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="/dev/shm/chaofeng/llava-v1.6-mistral-7b")
-    version: Optional[str] = field(default="llava_mistral")
+    version: Optional[str] = field(default="mistral_instruct") # llava_llama_2, llava_mistral, mistral_instruct
+    ### first llava_llama_2
+    
     freeze_backbone: bool = field(default=False)
-    tune_mm_mlp_adapter: bool = field(default=True)
+    tune_mm_mlp_adapter: bool = field(default=False)
     vision_tower: Optional[str] = field(default='openai/clip-vit-large-patch14-336')   # clip 图片编码器
     mm_vision_select_layer: Optional[int] = field(default=-2)                      # 选择clip第几层特征进行返回
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)                   
@@ -65,7 +67,9 @@ class TrainingArguments(transformers.TrainingArguments):
         default=16,
         metadata={"help": "How many bits to use."}
     )
-    lora_enable: bool = False
+    
+    # lora config
+    lora_enable: bool = True
     lora_r: int = 64
     lora_alpha: int = 16
     lora_dropout: float = 0.05
@@ -77,19 +81,18 @@ class TrainingArguments(transformers.TrainingArguments):
     # modified
     output_dir: str = field(default='/home/chaofeng/llava_finetune/lora-checkpoint')
     deepspeed: str = '/home/chaofeng/LLaVA/scripts/zero2.json'
-    lora_enable: bool = True
     
     bf16: bool = True
     num_train_epochs: int = 1
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 4
-    gradient_accumulation_steps: int = 4
+    gradient_accumulation_steps: int = 1
     evaluation_strategy: str =  "no"
     save_strategy: str = "steps"
     save_steps: str = 50000
     save_total_limit: str = 1
-    learning_rate: float = 2e-5
-    weight_decay: float = 0.
+    learning_rate: float = 2e-6
+    weight_decay: float = 0.001
     warmup_ratio: float = 0.03
     lr_scheduler_type: str =  "cosine"  #####
     #lr_scheduler_kwargs: dict = {}
@@ -107,7 +110,7 @@ def train(model, train_loader, training_args:TrainingArguments):
     scaler = GradScaler(enabled=training_args.bf16)
     for epoch in range(training_args.num_train_epochs):
         for step, batch in enumerate(train_loader):
-            print('step', step)
+            #print('step', step)
             step += 1 + epoch * len(train_loader)
             with autocast('cuda', enabled=training_args.bf16, dtype=torch.bfloat16):
                 batch = prepare_inputs(batch, model)
@@ -125,13 +128,13 @@ def train(model, train_loader, training_args:TrainingArguments):
                 
                 # save csv
                 data = {'step': step, 'loss_item': loss_item, 'current_lr': current_lr}
-                save_metric(data, '/home/chaofeng/llava_finetune/doc/train_loss_lora.csv')
+                save_metric(data, '/home/chaofeng/llava_finetune/doc/train_loss_lora2.csv')
 
             lr_scheduler.step()
 
 
-            save_peft_lora_model(model, training_args)
-            return
+    save_peft_lora_model(model, training_args)
+    
 
 
 
@@ -160,10 +163,11 @@ def train(model, train_loader, training_args:TrainingArguments):
 def save_peft_lora_model(model, training_args):
     from train.utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3
     model.config.use_cache = True
-
+    # get lora
     state_dict = get_peft_state_maybe_zero_3(
                     model.named_parameters(), training_args.lora_bias
                     )
+    # get no lora, e.g mm_proj_adapter
     non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
                     model.named_parameters()
                     )
@@ -171,7 +175,6 @@ def save_peft_lora_model(model, training_args):
         model.config.save_pretrained(training_args.output_dir)
         model.save_pretrained(training_args.output_dir, state_dict=state_dict)
         torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
-
 
 def load_peft_lora_model(lora_path, model_path):
     pass
@@ -197,6 +200,7 @@ if __name__ == '__main__':
                 )
     model.config.use_cache = False
     
+    # NOTE 需要进阶理解这个内容
     # 梯度回传到输入，用于gradient_checkpointing的训练；gradient_checkpointing每次随机保留一部分中间梯度进行更新，减小显存使用
     if training_args.gradient_checkpointing:
         if hasattr(model, "enable_input_require_grads"):
@@ -273,11 +277,14 @@ if __name__ == '__main__':
     model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer) ########### tokenizer出问题
 
 
-    
+    data_args.image_grid_pinpoints = model.config.image_grid_pinpoints
     train_loader = build_dataloader(data_args, training_args, tokenizer)
     training_args.num_training_steps = training_args.num_train_epochs * len(train_loader)
 
     train(model, train_loader, training_args)
+    """
+    过一遍input_ids如何生成
+    """
 
 
     

@@ -29,6 +29,17 @@ class DataArguments:
     image_folder: Optional[str] = field(default=None)
     image_aspect_ratio: str = 'square'
 
+from llava_model.utils.mm_utils import process_images
+
+
+def load_images(image_files):
+    out = []
+    for image_file in image_files:
+        image = Image.open(image_file).convert("RGB")
+        out.append(image)
+    return out
+  
+    
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
@@ -72,24 +83,38 @@ class LazySupervisedDataset(Dataset):
             image_file = self.list_data_dict[i]['image']
             image_folder = self.data_args.image_folder
             processor = self.data_args.image_processor
-            image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
-            if self.data_args.image_aspect_ratio == 'pad':
-                def expand2square(pil_img, background_color):
-                    width, height = pil_img.size
-                    if width == height:
-                        return pil_img
-                    elif width > height:
-                        result = Image.new(pil_img.mode, (width, width), background_color)
-                        result.paste(pil_img, (0, (width - height) // 2))
-                        return result
-                    else:
-                        result = Image.new(pil_img.mode, (height, height), background_color)
-                        result.paste(pil_img, ((height - width) // 2, 0))
-                        return result
-                image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-            else:
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+            # image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
+            image = load_images([os.path.join(image_folder, image_file)])
+
+            #image_file = '/morph-chaofeng/stock/real/ice-2799109_1280.png'
+            #image = load_images([image_file])
+
+            # if self.data_args.image_aspect_ratio == 'pad':
+            #     def expand2square(pil_img, background_color):
+            #         width, height = pil_img.size
+            #         if width == height:
+            #             return pil_img
+            #         elif width > height:
+            #             result = Image.new(pil_img.mode, (width, width), background_color)
+            #             result.paste(pil_img, (0, (width - height) // 2))
+            #             return result
+            #         else:
+            #             result = Image.new(pil_img.mode, (height, height), background_color)
+            #             result.paste(pil_img, ((height - width) // 2, 0))
+            #             return result
+            #     image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
+            #     image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+       
+            # else:
+            #     image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+            image = process_images(
+                image,
+                processor,
+                self.data_args
+            )    
+
+            
+
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args)
