@@ -85,6 +85,7 @@ class LazySupervisedDataset(Dataset):
             processor = self.data_args.image_processor
             # image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
             image = load_images([os.path.join(image_folder, image_file)])
+            image_size = image[0].size
 
             #image_file = '/morph-chaofeng/stock/real/ice-2799109_1280.png'
             #image = load_images([image_file])
@@ -107,14 +108,13 @@ class LazySupervisedDataset(Dataset):
        
             # else:
             #     image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+            
             image = process_images(
                 image,
                 processor,
                 self.data_args
-            )    
-
-            
-
+            )
+            image = image.squeeze(0)    
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args)
@@ -131,10 +131,12 @@ class LazySupervisedDataset(Dataset):
         # image exist in the data
         if 'image' in self.list_data_dict[i]:
             data_dict['image'] = image
+            data_dict['image_size'] = image_size
         elif self.data_args.is_multimodal:
             # image does not exist in the data, but the model is multimodal
             crop_size = self.data_args.image_processor.crop_size
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+            data_dict['image_size'] = [(crop_size['height'], crop_size['width'])]
         return data_dict
 
 
@@ -168,6 +170,9 @@ class DataCollatorForSupervisedDataset(object):
                 batch['images'] = torch.stack(images)
             else:
                 batch['images'] = images
+            
+            image_sizes = [instance['image_size'] for instance in instances]
+            batch['image_sizes'] = image_sizes          
 
         return batch
 

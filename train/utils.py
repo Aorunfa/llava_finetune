@@ -9,6 +9,9 @@ def prepare_inputs(inputs: Dict, model):
     dtype = next(model.parameters()).dtype
     inputs_new = {}
     for k, v in inputs.items():
+        if not isinstance(v, torch.Tensor):
+            inputs_new[k] = v
+            continue
         if v.dtype != torch.float:
             inputs_new[k] = v.to(device)
         else:
