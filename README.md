@@ -8,6 +8,7 @@
 
 实战 peft库支持的loar微调、lora模型加载、lora模型合并过程，以及低bit微调
 
-实战 fsdp训练过程
+实战 fsdp训练过程: fsdp模型分片，数据加载，训练，保存模型，cpuoffload功能
+
 
 

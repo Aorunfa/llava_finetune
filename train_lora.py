@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 import copy
 from dataclasses import dataclass, field
 import json
@@ -26,7 +26,7 @@ class ModelArguments:
     ### first llava_llama_2
     
     freeze_backbone: bool = field(default=False)
-    tune_mm_mlp_adapter: bool = field(default=False)
+    tune_mm_mlp_adapter: bool = field(default=True)
     vision_tower: Optional[str] = field(default='openai/clip-vit-large-patch14-336')   # clip 图片编码器
     mm_vision_select_layer: Optional[int] = field(default=-2)                          # 选择clip第几层特征进行返回
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)                   
@@ -232,17 +232,19 @@ if __name__ == '__main__':
     )
 
     model = get_peft_model(model, peft_config)
-    model.print_trainable_parameters()
+    # model.print_trainable_parameters()
 
-    model = model.cuda()
 
     # train mm_mlp_adapter
     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
     if model_args.tune_mm_mlp_adapter:
-        model.requires_grad_(False)
+        #model.requires_grad_(False)
         for p in model.get_model().mm_projector.parameters():
             p.requires_grad = True
     
+    model.print_trainable_parameters()
+    model = model.cuda()
+
     # not train mm_mlp_adapter
     model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter
     if training_args.freeze_mm_mlp_adapter:
@@ -258,10 +260,17 @@ if __name__ == '__main__':
 
 
     data_args.image_grid_pinpoints = model.config.image_grid_pinpoints
-    train_loader = build_dataloader(data_args, training_args, tokenizer)
+    train_loader, _ = build_dataloader(data_args, training_args, tokenizer)
     training_args.num_training_steps = training_args.num_train_epochs * len(train_loader)
 
     train(model, train_loader, training_args)
+    # print(model)
+    # print('---------')
+    # for name, module in model.named_modules():
+    #     print(f"模块名称: {name}, 模块类型: {type(module).__name__}")
+
+
+    
     """
     过一遍input_ids如何生成
     """

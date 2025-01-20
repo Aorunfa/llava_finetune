@@ -32,16 +32,29 @@ def print_loss(step, loss_item, current_lr):
     print("step: {:0>8d}{:>8s} loss: {:.4f} lr: {:.8f}".format(step, '', loss_item, current_lr))
 
 
-def build_dataloader(data_args, training_args, tokenizer):
+def build_dataloader(data_args, training_args, tokenizer, dist=False):
     # build trian dataset, collect_fun, val dataset
     from train.dataset import make_supervised_data_module
     from torch.utils.data import DataLoader
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
-    train_loader = DataLoader(data_module['train_dataset'], 
-                              num_workers=training_args.dataloader_num_workers, 
-                              batch_size=training_args.per_device_train_batch_size, 
-                              collate_fn=data_module['data_collator'])
-    return train_loader
+    sampler = None
+    if not dist:
+        train_loader = DataLoader(data_module['train_dataset'], 
+                                num_workers=training_args.dataloader_num_workers, 
+                                batch_size=training_args.per_device_train_batch_size, 
+                                collate_fn=data_module['data_collator'],
+                                )
+    else:
+        from torch.utils.data.distributed import DistributedSampler
+        sampler = DistributedSampler(data_module['train_dataset'], shuffle=True, seed=12345)
+        train_loader = DataLoader(data_module['train_dataset'], 
+                                num_workers=training_args.dataloader_num_workers, 
+                                batch_size=training_args.per_device_train_batch_size, 
+                                collate_fn=data_module['data_collator'],
+                                sampler=sampler
+                                )
+
+    return train_loader, sampler
 
 
 def build_optimizer_scheduler(training_args, opt_model):
