@@ -7,24 +7,15 @@ import json
 from PIL import Image
 import os
 import copy
-from llava_model.utils.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from llava_model.utils import conversation as conversation_lib
-from llava_model.utils.mm_utils import tokenizer_image_token
-from llava_model.utils.mm_utils import process_images
-
-conversation_lib.default_conversation = conversation_lib.conv_templates['mistral_instruct']
-
+from llava.utils.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.utils import conversation as conversation_lib
+from llava.utils.mm_utils import tokenizer_image_token
+from llava.utils.mm_utils import process_images
 
 local_rank = None
-
-
 def rank0_print(*args):
     if local_rank == 0:
         print(*args)
-
-
-
-
 
 def load_images(image_files):
     out = []
@@ -47,6 +38,14 @@ class LazySupervisedDataset(Dataset):
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
         self.data_args = data_args
+
+        # update conv_templates gloable
+        global conversation_lib
+        if data_args.model_version in conversation_lib.conv_templates:
+            conversation_lib.default_conversation = conversation_lib.conv_templates[data_args.model_version]
+        else:
+            conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
+
 
     def __len__(self):
         return len(self.list_data_dict)
