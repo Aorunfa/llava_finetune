@@ -78,7 +78,7 @@ class TrainingArguments(transformers.TrainingArguments):
     # modified
     output_dir: str = field(default='/home/chaofeng/llava_finetune/lora-checkpoint3')
     deepspeed: str = '/home/chaofeng/LLaVA/scripts/zero2.json'
-    metric_csv: str = '/home/chaofeng/llava_finetune/doc/train_loss_lora3.csv'
+    metric_csv: str = '/home/chaofeng/llava_finetune/doc/train_loss_fsdp.csv'
     
     bf16: bool = True
     num_train_epochs: int = 1
@@ -125,9 +125,6 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
                 torch_dtype=compute_dtype
                 )
     model.config.use_cache = False
-    # print(model)
-    #import time
-    #time.sleep(10000)
     
     # checkpointing for embedding grad form clip to llm
     if training_args.gradient_checkpointing:
@@ -216,100 +213,63 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
                     buffer_dtype=torch.bfloat16,
                     reduce_dtype=torch.bfloat16,
                     )
-    # def custom_auto_wrap_policy(module: nn.Module, 
-    #                             recurse: bool, 
-    #                             nonwrapped_numel: int) -> bool:
-    #     # print(module)
-    #     global tol
-    #     has_unfrozen_params = all(param.requires_grad for param in module.parameters())
-    #     print('has_unfrozen_params ', has_unfrozen_params)
-    #     is_big = nonwrapped_numel > 10 * 1024 * 1024
-    #     # if has_unfrozen_params and is_big:
-    #     #     tol += 1
-    #     #     print(111111)
-    #     return has_unfrozen_params or is_big
     
     # def lambda_fn(module: nn.Module):
     #     nonwrapped_numel = 0
     #     requires_grad = []
-    #     print('11111111')
     #     for param in module.parameters():
     #         requires_grad.append(param.requires_grad)
     #         nonwrapped_numel += param.numel()
 
     #     has_unfrozen_params = all(requires_grad)
-    #     is_big = nonwrapped_numel > 100 * 1024 * 1024
-    #     return has_unfrozen_params and is_big
+    #     is_big = nonwrapped_numel > 10 * 1024 * 1024
+    #     if has_unfrozen_params and is_big:
+    #         return {"sharding_strategy": ShardingStrategy.FULL_SHARD}
+    #     elif is_big:
+    #         return {"sharding_strategy": ShardingStrategy.FULL_SHARD}
+    #     else:
+    #         return False
+    # custom_auto_wrap_policy = CustomPolicy(lambda_fn)
 
+    # from functools import partial
+    # custom_auto_wrap_policy = partial(size_based_auto_wrap_policy, min_num_params=2 * 1024 * 1024)
 
-    
-
-    # # policy = CustomPolicy(lambda_fn)
-
-    # def custom_auto_wrap_policy_reverse(module: nn.Module, name) -> bool:
-    #     nonwrapped_numel = 0
-    #     requires_grad = []
-    #     for param in module.parameters():
-    #         requires_grad.append(param.requires_grad)
-    #         nonwrapped_numel += param.numel()
-    #     has_unfrozen_params = all(requires_grad)
-    #     is_big = nonwrapped_numel > 100 * 1024 * 1024
-        
-    #     # if has_unfrozen_params:
-    #     #     print('yes ', name)
-        
-    #     return not (has_unfrozen_params or is_big)
 
     def custom_auto_wrap_policy(module: nn.Module, 
                                 recurse: bool, 
                                 nonwrapped_numel: int) -> bool:
-        # print(module)
-        global tol
-        has_unfrozen_params = all(param.requires_grad for param in module.parameters())
-        # print('has_unfrozen_params ', has_unfrozen_params)
-        is_big = nonwrapped_numel > 10 * 1024 * 1024
-        # if has_unfrozen_params and is_big:
-        #     tol += 1
-        #     print(111111)
-        return is_big
-
-
-    # policy = CustomPolicy(lambda_fn)
-
-    def custom_auto_wrap_policy_reverse(module: nn.Module, name) -> bool:
         nonwrapped_numel = 0
         requires_grad = []
         for param in module.parameters():
             requires_grad.append(param.requires_grad)
             nonwrapped_numel += param.numel()
         has_unfrozen_params = all(requires_grad)
-        is_big = nonwrapped_numel > 10 * 1024 * 1024
-        
-        # if has_unfrozen_params:
-        #     print('yes ', name)
-        
-        return not (is_big)
-    
+        is_large = nonwrapped_numel > 2 * 1024 * 1024    
+        return is_large or has_unfrozen_params
 
-    ignored_states = [module for name, module in model.named_modules() if custom_auto_wrap_policy_reverse(module, name)]
+    def custom_auto_wrap_policy_reverse(module: nn.Module) -> bool:
+        nonwrapped_numel = 0
+        requires_grad = []
+        for param in module.parameters():
+            requires_grad.append(param.requires_grad)
+            nonwrapped_numel += param.numel()
+        has_unfrozen_params = all(requires_grad)
+        is_large = nonwrapped_numel > 2 * 1024 * 1024
+        return not (is_large)
 
+
+    ignored_states = [module for name, module in model.named_modules() if custom_auto_wrap_policy_reverse(module)]
 
     model.to(rank)
     model = FSDP(model,
                  mixed_precision=bfSixteen,
-                 auto_wrap_policy= custom_auto_wrap_policy, # custom_auto_wrap_policy,
+                 auto_wrap_policy= custom_auto_wrap_policy,
                  device_id=torch.cuda.current_device(),
                  sharding_strategy=ShardingStrategy.FULL_SHARD, # ShardingStrategy.FULL_SHARD， ShardingStrategy.SHARD_GRAD_OP
-                 use_orig_params=False,                            # for foreezon trainning                
-                 ignored_states=ignored_states
+                 use_orig_params=False,                         # for foreezon trainning if fsdp mixed required_grad=Trua and False                
+                 ignored_states=ignored_states,
+                 # backward_prefetch = BackwardPrefetch.BACKWARD_PRE
                  )
-    
-    print(len(ignored_states))
-    print(model)
-    # print('tol ', tol)
-    import time
-    # time.sleep(10000)
-    
     ############################################### end fsdp model ###############################################
     
     model.train()
@@ -386,4 +346,6 @@ if __name__ == '__main__':
             nprocs=WORLD_SIZE,
             join=True
             )
-    
+    """
+    nohup /var/lib/anaconda3/envs/llava/bin/python /home/chaofeng/llava_finetune/train_lora_fsdp.py > /home/chaofeng/llava_finetune/doc/fsdp.log 2>&1 &
+    """
