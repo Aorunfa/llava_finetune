@@ -11,6 +11,9 @@ from llava.utils.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE
 from llava.utils import conversation as conversation_lib
 from llava.utils.mm_utils import tokenizer_image_token
 from llava.utils.mm_utils import process_images
+from packaging import version
+import tokenizers
+IS_TOKENIZER_GREATER_THAN_0_14 = version.parse(tokenizers.__version__) >= version.parse('0.14')
 
 local_rank = None
 def rank0_print(*args):
@@ -80,9 +83,6 @@ class LazySupervisedDataset(Dataset):
             image = load_images([os.path.join(image_folder, image_file)])
             image_size = image[0].size
 
-            #image_file = '/morph-chaofeng/stock/real/ice-2799109_1280.png'
-            #image = load_images([image_file])
-
             # if self.data_args.image_aspect_ratio == 'pad':
             #     def expand2square(pil_img, background_color):
             #         width, height = pil_img.size
@@ -102,6 +102,7 @@ class LazySupervisedDataset(Dataset):
             # else:
             #     image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
             
+            # Compatible with v1.6 and v1.5
             image = process_images(
                 image,
                 processor,

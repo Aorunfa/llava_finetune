@@ -1,6 +1,6 @@
 import os
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 import torch.nn as nn
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -11,28 +11,30 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import (
     ShardingStrategy,
     )
 
+from torch.distributed.fsdp.wrap import (
+    size_based_auto_wrap_policy,
+    CustomPolicy
+)
+
 from torch.distributed.fsdp import MixedPrecision
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence, List
+from typing import Dict, Optional
 import torch
 import transformers
-import tokenizers
-from peft import get_peft_model, LoraConfig, TaskType
+from peft import get_peft_model, LoraConfig
 from torch.amp.autocast_mode import autocast
-from torch.cuda.amp import GradScaler
 from train.utils import (
                     build_dataloader, 
                     build_optimizer_scheduler, 
                     prepare_inputs, 
                     print_loss, 
                     save_metric)
+from llava.llm.llava_mistral import LlavaMistralForCausalLM
 
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="/dev/shm/chaofeng/llava-v1.6-mistral-7b")
-    version: Optional[str] = field(default="mistral_instruct") # llava_llama_2, llava_mistral, mistral_instruct
-    ### first llava_llama_2
-    
+    version: Optional[str] = field(default="mistral_instruct") # llava_llama_2, llava_mistral, mistral_instruct    
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=True)
     vision_tower: Optional[str] = field(default='openai/clip-vit-large-patch14-336')   # clip 图片编码器
@@ -52,9 +54,8 @@ class DataArguments:
     lazy_preprocess: bool = True
     is_multimodal: bool = False
     image_folder: Optional[str] = field(default='/dev/shm/chaofeng/LLaVA-CC3M-Pretrain-595K/dataset')
-    image_aspect_ratio: str = 'pad' # 图片处理方式, anyres划分四个象限和中间 一张图会得到五张图
+    image_aspect_ratio: str = 'pad'
 
-# transformers.TrainingArguments
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     cache_dir: Optional[str] = field(default=None)
@@ -62,19 +63,6 @@ class TrainingArguments(transformers.TrainingArguments):
     remove_unused_columns: bool = field(default=False)
     freeze_mm_mlp_adapter: bool = field(default=False)
     mpt_attn_impl: Optional[str] = field(default="triton")
-  
-    double_quant: bool = field(
-        default=False,
-        metadata={"help": "Compress the quantization statistics through double quantization."}
-    )
-    quant_type: str = field(
-        default="nf4",
-        metadata={"help": "Quantization data type to use. Should be one of `fp4` or `nf4`."}
-    )
-    bits: int = field(
-        default=16,
-        metadata={"help": "How many bits to use."}
-    )
     
     # lora config
     lora_enable: bool = True
@@ -83,6 +71,7 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_dropout: float = 0.05
     lora_weight_path: str = ""
     lora_bias: str = "none"
+
     mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
 
@@ -103,8 +92,7 @@ class TrainingArguments(transformers.TrainingArguments):
     learning_rate: float = 1e-5
     weight_decay: float = 0.
     warmup_ratio: float = 0.03
-    lr_scheduler_type: str =  "cosine"  #####
-    #lr_scheduler_kwargs: dict = {}
+    lr_scheduler_type: str =  "cosine"
     logging_steps: int = 1
     tf32: bool = True
     model_max_length: int =  2048
@@ -126,26 +114,22 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
     # dist init
     setup(rank, world_size)
     training_args.local_rank = rank
-    local_rank = training_args.local_rank
-    compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
-    print(local_rank)
-
-    from llava_model.llm.llava_mistral import LlavaMistralForCausalLM
-    from llava_model.utils import conversation as conversation_lib
+    compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))    
     
-    # 模型 
+    # model
     attn_implementation = None # or 'flash_attention_2'
     model = LlavaMistralForCausalLM.from_pretrained(
                 pretrained_model_name_or_path=model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 attn_implementation=attn_implementation,
-                torch_dtype=(torch.bfloat16 if training_args.bf16 else None)
+                torch_dtype=compute_dtype
                 )
     model.config.use_cache = False
+    # print(model)
+    #import time
+    #time.sleep(10000)
     
-    
-    # NOTE 需要进阶理解这个内容
-    # 梯度回传到输入，用于gradient_checkpointing的训练；gradient_checkpointing每次随机保留一部分中间梯度进行更新，减小显存使用
+    # checkpointing for embedding grad form clip to llm
     if training_args.gradient_checkpointing:
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
@@ -161,14 +145,9 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
             model_max_length=training_args.model_max_length,
             padding_side="left",
             use_fast=False,
-        )
-    
+        )    
     tokenizer.pad_token = tokenizer.unk_token
-    if model_args.version in conversation_lib.conv_templates:
-        conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
-    else:
-        conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
-    
+
     # load clip encoder
     model.get_model().initialize_vision_modules(
         model_args=model_args,
@@ -176,8 +155,7 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
     )
     
     vision_tower = model.get_vision_tower()
-    vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16)
-    # model.cpu()
+    vision_tower.to(dtype=compute_dtype)
 
     data_args.image_processor = vision_tower.image_processor
     data_args.is_multimodal = True
@@ -187,24 +165,24 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
     model.config.tokenizer_model_max_length = tokenizer.model_max_length
 
 
-    # train lora
-    from train.utils import find_all_linear_names
-    target_modules = find_all_linear_names(model)    
-    peft_config = LoraConfig(
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.05,
-        target_modules=target_modules   # suffix
-    )
-
-
-    model = get_peft_model(model, peft_config)
-
+    # lora
+    if training_args.lora_enable:
+        from train.utils import find_all_linear_names
+        target_modules = find_all_linear_names(model)    
+        peft_config = LoraConfig(
+            r=training_args.lora_r,
+            lora_alpha=training_args.lora_alpha,
+            lora_dropout=training_args.lora_dropout,
+            bias=training_args.lora_bias,
+            target_modules=target_modules
+        )
+        model = get_peft_model(model, peft_config)
+    
     # train mm_mlp_adapter
     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
     print('tune_mm_mlp_adapter',  model.config.tune_mm_mlp_adapter)
     if model_args.tune_mm_mlp_adapter:
-        # model.requires_grad_(False) # lora don't need 
+        #model.requires_grad_(False)
         for p in model.get_model().mm_projector.parameters():
             p.requires_grad = True
     
@@ -222,58 +200,117 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
     model.config.mm_projector_lr = training_args.mm_projector_lr
     training_args.use_im_start_end = model_args.mm_use_im_start_end
     model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
-    model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer) ########### tokenizer出问题
+    model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
     # build dist dataloader
-    data_args.image_grid_pinpoints = model.config.image_grid_pinpoints
     data_args.tokenizer = tokenizer
-
-
-    # dist dataloader
+    data_args.model_version = model_args.version
+    data_args.image_grid_pinpoints = model.config.image_grid_pinpoints
     train_loader, sampler = build_dataloader(data_args, training_args, tokenizer=data_args.tokenizer, dist=True)
     training_args.num_training_steps = training_args.num_train_epochs * len(train_loader)
     torch.cuda.set_device(rank)
 
-    ############################################### fsdp ，model ############# 
+    ############################################### set fsdp model ############################################### 
     bfSixteen = MixedPrecision(
-                        param_dtype=torch.bfloat16,
-                        buffer_dtype=torch.bfloat16,
-                        reduce_dtype=torch.bfloat16,
+                    param_dtype=torch.bfloat16,
+                    buffer_dtype=torch.bfloat16,
+                    reduce_dtype=torch.bfloat16,
                     )
+    # def custom_auto_wrap_policy(module: nn.Module, 
+    #                             recurse: bool, 
+    #                             nonwrapped_numel: int) -> bool:
+    #     # print(module)
+    #     global tol
+    #     has_unfrozen_params = all(param.requires_grad for param in module.parameters())
+    #     print('has_unfrozen_params ', has_unfrozen_params)
+    #     is_big = nonwrapped_numel > 10 * 1024 * 1024
+    #     # if has_unfrozen_params and is_big:
+    #     #     tol += 1
+    #     #     print(111111)
+    #     return has_unfrozen_params or is_big
+    
+    # def lambda_fn(module: nn.Module):
+    #     nonwrapped_numel = 0
+    #     requires_grad = []
+    #     print('11111111')
+    #     for param in module.parameters():
+    #         requires_grad.append(param.requires_grad)
+    #         nonwrapped_numel += param.numel()
+
+    #     has_unfrozen_params = all(requires_grad)
+    #     is_big = nonwrapped_numel > 100 * 1024 * 1024
+    #     return has_unfrozen_params and is_big
+
+
+    
+
+    # # policy = CustomPolicy(lambda_fn)
+
+    # def custom_auto_wrap_policy_reverse(module: nn.Module, name) -> bool:
+    #     nonwrapped_numel = 0
+    #     requires_grad = []
+    #     for param in module.parameters():
+    #         requires_grad.append(param.requires_grad)
+    #         nonwrapped_numel += param.numel()
+    #     has_unfrozen_params = all(requires_grad)
+    #     is_big = nonwrapped_numel > 100 * 1024 * 1024
+        
+    #     # if has_unfrozen_params:
+    #     #     print('yes ', name)
+        
+    #     return not (has_unfrozen_params or is_big)
+
     def custom_auto_wrap_policy(module: nn.Module, 
                                 recurse: bool, 
-                                nonwrapped_numel: int) -> bool:     
+                                nonwrapped_numel: int) -> bool:
+        # print(module)
+        global tol
         has_unfrozen_params = all(param.requires_grad for param in module.parameters())
-        # is_big = nonwrapped_numel > 10 * 1024 * 1024
+        # print('has_unfrozen_params ', has_unfrozen_params)
         is_big = nonwrapped_numel > 10 * 1024 * 1024
-        return has_unfrozen_params and is_big
+        # if has_unfrozen_params and is_big:
+        #     tol += 1
+        #     print(111111)
+        return is_big
 
-    lava_fitune_auto_wrap_policy = custom_auto_wrap_policy
-    def custom_auto_wrap_policy2(module: nn.Module, 
-                                ) -> bool:
+
+    # policy = CustomPolicy(lambda_fn)
+
+    def custom_auto_wrap_policy_reverse(module: nn.Module, name) -> bool:
         nonwrapped_numel = 0
         requires_grad = []
         for param in module.parameters():
             requires_grad.append(param.requires_grad)
             nonwrapped_numel += param.numel()
         has_unfrozen_params = all(requires_grad)
-        # is_big = nonwrapped_numel > 10 * 1024 * 1024
         is_big = nonwrapped_numel > 10 * 1024 * 1024
-        return not (has_unfrozen_params and is_big)
-
-    ignored_states = [module for name, module in model.named_modules() if custom_auto_wrap_policy2(module)]
+        
+        # if has_unfrozen_params:
+        #     print('yes ', name)
+        
+        return not (is_big)
     
+
+    ignored_states = [module for name, module in model.named_modules() if custom_auto_wrap_policy_reverse(module, name)]
+
+
     model.to(rank)
     model = FSDP(model,
                  mixed_precision=bfSixteen,
-                 auto_wrap_policy=lava_fitune_auto_wrap_policy,
+                 auto_wrap_policy= custom_auto_wrap_policy, # custom_auto_wrap_policy,
                  device_id=torch.cuda.current_device(),
-                 sharding_strategy=ShardingStrategy.SHARD_GRAD_OP, # ShardingStrategy.FULL_SHARD， ShardingStrategy.SHARD_GRAD_OP
+                 sharding_strategy=ShardingStrategy.FULL_SHARD, # ShardingStrategy.FULL_SHARD， ShardingStrategy.SHARD_GRAD_OP
                  use_orig_params=False,                            # for foreezon trainning                
-                 ignored_states = ignored_states
+                 ignored_states=ignored_states
                  )
     
-    ###############################################
+    print(len(ignored_states))
+    print(model)
+    # print('tol ', tol)
+    import time
+    # time.sleep(10000)
+    
+    ############################################### end fsdp model ###############################################
     
     model.train()
     optimizer, lr_scheduler = build_optimizer_scheduler(training_args, model)
@@ -294,7 +331,6 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)
                 optimizer.step()
                 optimizer.zero_grad()
-                #ddp_loss = dist.all_reduce(ddp_loss, op=dist.ReduceOp.AVG)
                 if rank == 0:
                     current_lr = optimizer.param_groups[0]['lr']
                     print_loss(step, loss_item_avg, current_lr)
@@ -328,43 +364,26 @@ def save_peft_lora_model(model, training_args):
             model.config.save_pretrained(training_args.output_dir)
             model.save_pretrained(training_args.output_dir, state_dict=state_dict)
             torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
+    model.config.use_cache = False
+
 
 def load_peft_lora_model(lora_path, model_path):
     pass
 
 
 if __name__ == '__main__':
-    parser = transformers.HfArgumentParser(
-        (ModelArguments, DataArguments, TrainingArguments)
-        )
+    """
+    使用torch原生fsdp进行分布式训练
+    fsdp对模型权重进行分片，每个fsdp unit只存分片权重的一部分
+    使用lora进行微调
+    """
+    parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()    
     WORLD_SIZE = torch.cuda.device_count()
     torch.manual_seed(1234)
     mp.spawn(train_fsdp,
             args=(WORLD_SIZE, model_args, training_args, data_args),
             nprocs=WORLD_SIZE,
-            join=True)
-
-
-
-    """
-    lora trainning 获取
-    低bit训练, q-lora 低比特双重量化 -- 感受一下显存占用的变化
-
-    ---------- ------------
-    ddp: 数据并行， 模型、梯度、优化器状态在同一个gpu上，优化器状态分布在主节点更新同步套所有节点。特点速度更快 但单卡峰值的显存依赖更大
-    fsdp: 将模型、梯度、优化器进行分片(gups个unit，每个unit含有模型、梯度、优化器的一个module的一个片段)
-        -- 举例将一个module参数等分为gpus个分片分布在每个fsdpunit中
-        -- forward fsdp unit 从其他rank中获取层的其他参数，恢复完整后每forward，结果传递给下一个unit
-        -- backward fsdp unit 从其他rank中获取层的其他参数，恢复完整后每forward，梯度分片保存，梯度函数传递给上一个unit
-        特点：速度慢一些，但是单卡峰值显存依赖小
-        当前后分片为多进程的方式工作，即上一节点不用完全等待下一节点处理完，此时可以实现模型(分片)并行的效果
-        详细讲解：http://shiyanjun.cn/archives/2292.html
-        官方教程：https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html#how-to-use-fsdp
-    --------- ------------
-    """
-
-
-
-
-
+            join=True
+            )
+    

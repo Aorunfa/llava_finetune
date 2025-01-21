@@ -1,11 +1,10 @@
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence, List
+from typing import Optional
 import torch
 import transformers
 from torch.amp.autocast_mode import autocast
-from torch.cuda.amp import GradScaler
 from train.utils import (
                     build_dataloader, 
                     build_optimizer_scheduler, 
@@ -38,7 +37,7 @@ class DataArguments:
     lazy_preprocess: bool = True
     is_multimodal: bool = False
     image_folder: Optional[str] = field(default='/dev/shm/chaofeng/LLaVA-CC3M-Pretrain-595K/dataset')
-    image_aspect_ratio: str = 'pad'     # 图片处理方式, anyres划分四个象限和中间 一张图会得到五张图, anyres for v1.6
+    image_aspect_ratio: str = 'anyres'     # 图片处理方式, anyres划分四个象限和中间 一张图会得到五张图, anyres for v1.6
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -47,7 +46,8 @@ class TrainingArguments(transformers.TrainingArguments):
     remove_unused_columns: bool = field(default=False)
     freeze_mm_mlp_adapter: bool = field(default=False)
     mpt_attn_impl: Optional[str] = field(default="triton")
-  
+    
+    # bit config
     double_quant: bool = field(
         default=False,
         metadata={"help": "Compress the quantization statistics through double quantization."}
@@ -67,13 +67,13 @@ class TrainingArguments(transformers.TrainingArguments):
 
     # modified
     output_dir: str = field(default='/home/chaofeng/llava_finetune/lora-checkpoint3')
-    metric_csv: str = '/home/chaofeng/llava_finetune/doc/train_loss_lora_8bit.csv'
+    metric_csv: str = '/home/chaofeng/llava_finetune/doc/train_loss_v16_lora_8bit.csv'
     
     bf16: bool = True
     num_train_epochs: int = 1
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 4
-    gradient_accumulation_steps: int = 16# 128
+    gradient_accumulation_steps: int = 128 # 16 # 128
     evaluation_strategy: str =  "no"
     save_strategy: str = "steps"
     save_steps: str = 50000
@@ -91,20 +91,16 @@ class TrainingArguments(transformers.TrainingArguments):
 
 def train(model, train_loader, training_args:TrainingArguments):
     model.train()
-    device = next(model.parameters()).device
     optimizer, lr_scheduler = build_optimizer_scheduler(training_args, model)
-    scaler = GradScaler(enabled=training_args.bf16)
     loss_item_avg = 0
     for epoch in range(training_args.num_train_epochs):
         for step, batch in enumerate(train_loader):
             step += 1 + epoch * len(train_loader)
-            with autocast('cuda', enabled=training_args.bf16, dtype=torch.bfloat16):
+            with autocast('cuda', enabled=training_args.bf16, dtype=torch.bfloat16):                
                 batch = prepare_inputs(batch, model)
                 loss = model(**batch, return_dict=True)['loss']
                 loss_item = loss.data.item()
                 loss_item_avg += loss_item
-
-
             
             loss.backward()
             if step % training_args.gradient_accumulation_steps == 0:
@@ -146,12 +142,14 @@ def load_peft_lora_model(lora_path, model_path):
     pass
 
 if __name__ == '__main__':
-    parser = transformers.HfArgumentParser(
-        (ModelArguments, DataArguments, TrainingArguments))
+    """
+    使用8/4bit量化微调llava-v1.6-mistral-7b, 只训mm_mlp_adapter
+    v1.6使用’image_aspect_ratio=anyres‘ 提取图片上下左右和中间的crop，得到五张图片
+    """
+    parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
-    print(local_rank)
 
     ## bit config
     bnb_model_from_pretrained_args = {}
@@ -188,9 +186,9 @@ if __name__ == '__main__':
                 torch_dtype=compute_dtype,
                 **bnb_model_from_pretrained_args
                 )
-    model.config.use_cache = False # for inference
+    model.config.use_cache = False # for training
     
-    # 打开embeding输入的梯度，方便使用梯度检查时，从vison encoder到llm有梯度的传入
+    # 打开embeding输入的梯度，方便使用梯度检查时，使得从vison encoder到llm有梯度的传入
     if training_args.gradient_checkpointing:
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
@@ -207,14 +205,8 @@ if __name__ == '__main__':
             padding_side="left",
             use_fast=False,
         )
-    
     tokenizer.pad_token = tokenizer.unk_token
 
-    # if model_args.version in conversation_lib.conv_templates:
-    #     conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
-    # else:
-    #     conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
-    
     # clip encoder
     model.get_model().initialize_vision_modules(
         model_args=model_args,
@@ -261,18 +253,6 @@ if __name__ == '__main__':
         for p in model.get_model().mm_projector.parameters():
             p.requires_grad = True
 
-
-    # for name, module in model.named_modules():
-    #     try:
-    #         # if next(module.parameters()).dtype is torch.float16 or next(module.parameters()).dtype is torch.float32:
-    #         #     print(next(module.parameters()).dtype)
-    #         if next(module.parameters()).dtype is torch.float16 or next(module.parameters()).dtype is torch.float32:
-    #             print(next(module.parameters()).dtype)
-    #             print(name, 'dt ', next(module.parameters()).dtype)
-    #             print(name, 'dt ', next(module.parameters()).requires_grad)
-    #     except:
-    #         pass
-
     model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end     # set image in start and end
     model.config.mm_projector_lr = training_args.mm_projector_lr                                         
     training_args.use_im_start_end = model_args.mm_use_im_start_end
@@ -280,20 +260,12 @@ if __name__ == '__main__':
     model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
     data_args.model_version = model_args.version
+    data_args.image_grid_pinpoints = model.config.image_grid_pinpoints
     train_loader, _ = build_dataloader(data_args, training_args, tokenizer)
     training_args.num_training_steps = training_args.num_train_epochs * len(train_loader)
     train(model, train_loader, training_args)
-
-   
-
     """
-    lora trainning 获取
-    低bit训练, q-lora 低比特双重量化 -- 感受一下显存占用的变化
-    """
-
-
-    """
-    nohup /var/lib/anaconda3/envs/llava/bin/python /home/chaofeng/llava_finetune/train_bit.py > /home/chaofeng/llava_finetune/doc/log_8bit.log 2>&1 &
+    nohup /var/lib/anaconda3/envs/llava/bin/python /home/chaofeng/llava_finetune/train_bit.py > /home/chaofeng/llava_finetune/doc/log_v16_8bit.log 2>&1 &
     """
 
 

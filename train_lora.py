@@ -1,17 +1,11 @@
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-import copy
 from dataclasses import dataclass, field
-import json
-import logging
-import pathlib
-from typing import Dict, Optional, Sequence, List
+from typing import Optional
 import torch
 import transformers
-import tokenizers
-from peft import get_peft_model, LoraConfig, TaskType
+from peft import get_peft_model, LoraConfig
 from torch.amp.autocast_mode import autocast
-from torch.cuda.amp import GradScaler
 from train.utils import (
                     build_dataloader, 
                     build_optimizer_scheduler, 
@@ -22,8 +16,7 @@ from train.utils import (
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="/dev/shm/chaofeng/llava-v1.5-7b")
-    version: Optional[str] = field(default="v1") # llava_llama_2, llava_mistral, mistral_instruct
-    ### first llava_llama_2
+    version: Optional[str] = field(default="v1")
     
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=True)
@@ -44,9 +37,8 @@ class DataArguments:
     lazy_preprocess: bool = True
     is_multimodal: bool = False
     image_folder: Optional[str] = field(default='/dev/shm/chaofeng/LLaVA-CC3M-Pretrain-595K/dataset')
-    image_aspect_ratio: str = 'pad' # 图片处理方式, anyres划分四个象限和中间 一张图会得到五张图
+    image_aspect_ratio: str = 'pad'                 # 图片处理方式, anyres划分四个象限和中间 一张图会得到五张图, anyres v1.6改进
 
-# transformers.TrainingArguments
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     cache_dir: Optional[str] = field(default=None)
@@ -54,19 +46,6 @@ class TrainingArguments(transformers.TrainingArguments):
     remove_unused_columns: bool = field(default=False)
     freeze_mm_mlp_adapter: bool = field(default=False)
     mpt_attn_impl: Optional[str] = field(default="triton")
-  
-    double_quant: bool = field(
-        default=False,
-        metadata={"help": "Compress the quantization statistics through double quantization."}
-    )
-    quant_type: str = field(
-        default="nf4",
-        metadata={"help": "Quantization data type to use. Should be one of `fp4` or `nf4`."}
-    )
-    bits: int = field(
-        default=16,
-        metadata={"help": "How many bits to use."}
-    )
     
     # lora config
     lora_enable: bool = True
@@ -75,13 +54,12 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_dropout: float = 0.05
     lora_weight_path: str = ""
     lora_bias: str = "none"
-    mm_projector_lr: Optional[float] = None
 
+    mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=True)
 
     # modified
     output_dir: str = field(default='/home/chaofeng/llava_finetune/lora-checkpoint')
-    deepspeed: str = '/home/chaofeng/LLaVA/scripts/zero2.json'
     metric_csv: str = '/home/chaofeng/llava_finetune/doc/train_loss_lora2_new.csv'
     
     fp16: bool = False
@@ -89,7 +67,7 @@ class TrainingArguments(transformers.TrainingArguments):
     num_train_epochs: int = 1
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 4
-    gradient_accumulation_steps: int = 128
+    gradient_accumulation_steps: int = 128  # per_device_train_batch_size * gradient_accumulation_steps should be 128
     evaluation_strategy: str =  "no"
     save_strategy: str = "steps"
     save_steps: str = 50000
@@ -97,41 +75,29 @@ class TrainingArguments(transformers.TrainingArguments):
     learning_rate: float = 1e-5
     weight_decay: float = 0.
     warmup_ratio: float = 0.03
-    lr_scheduler_type: str =  "cosine"  #####
-    #lr_scheduler_kwargs: dict = {}
+    lr_scheduler_type: str =  "cosine"  
     logging_steps: int = 1
     tf32: bool = True
     model_max_length: int =  2048
     gradient_checkpointing: bool = True
     dataloader_num_workers: int = 4
 
-
 def train(model, train_loader, training_args:TrainingArguments):
     model.train()
-    device = next(model.parameters()).device
     optimizer, lr_scheduler = build_optimizer_scheduler(training_args, model)
-    scaler = GradScaler(enabled=training_args.fp16)
     loss_item_avg = 0
     for epoch in range(training_args.num_train_epochs):
         for step, batch in enumerate(train_loader):
-            #print('step', step)
-            step += 1 + epoch * len(train_loader)
+            step += 1 + epoch * len(train_loader)            
+            with autocast('cuda', enabled=training_args.bf16, dtype=torch.bfloat16):
+                batch = prepare_inputs(batch, model)
+                loss = model(**batch, return_dict=True)['loss']
+                loss_item = loss.data.item()
+                loss_item_avg += loss_item
 
-            batch = prepare_inputs(batch, model)
-            loss = model(**batch, return_dict=True)['loss']
-            loss_item = loss.data.item()
-            loss_item_avg += loss_item
-
-            # scaler.scale(loss).backward()
             loss.backward()
             if step % training_args.gradient_accumulation_steps == 0:
-                loss_item_avg = loss_item_avg / training_args.gradient_accumulation_steps
-
-                #scaler.unscale_(optimizer)
-                #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)
-                #scaler.step(optimizer)
-                #scaler.update()
-                
+                loss_item_avg = loss_item_avg / training_args.gradient_accumulation_steps                
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)
                 optimizer.step()
                 optimizer.zero_grad()
@@ -169,19 +135,18 @@ def load_peft_lora_model(lora_path, model_path):
     pass
 
 if __name__ == '__main__':
+    """
+    使用lora微调llava-v1.5-7b
+    """
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
-    print(local_rank)
-    print('compute_dtype ', compute_dtype)
 
-    # from llava_model.llm.llava_mistral import LlavaMistralForCausalLM
-    from llava_model.llm.llava_llama import LlavaLlamaForCausalLM
-    from llava_model.utils import conversation as conversation_lib
+    from llava.llm.llava_llama import LlavaLlamaForCausalLM
     
-    # 模型 
+    # model 
     attn_implementation = None # or 'flash_attention_2'
     model = LlavaLlamaForCausalLM.from_pretrained(
                 pretrained_model_name_or_path=model_args.model_name_or_path,
@@ -191,8 +156,6 @@ if __name__ == '__main__':
                 )
     model.config.use_cache = False
     
-    # NOTE 需要进阶理解这个内容
-    # 每次随机保留一部分中间梯度进行更新，减小显存使用
     if training_args.gradient_checkpointing:
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
@@ -206,17 +169,12 @@ if __name__ == '__main__':
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
             model_max_length=training_args.model_max_length,
-            padding_side="left",
+            padding_side="right",
             use_fast=False,
-        )
-    
+        )    
     tokenizer.pad_token = tokenizer.unk_token
-    if model_args.version in conversation_lib.conv_templates:
-        conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
-    else:
-        conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
     
-    # load clip encoder
+    # clip encoder
     model.get_model().initialize_vision_modules(
         model_args=model_args,
         fsdp=training_args.fsdp
@@ -234,18 +192,18 @@ if __name__ == '__main__':
 
 
     # train lora
-    from train.utils import find_all_linear_names
-    target_modules = find_all_linear_names(model)    
-    peft_config = LoraConfig(
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.05,
-        target_modules=target_modules   # suffix
-    )
+    if training_args.lora_enable:
+        from train.utils import find_all_linear_names
+        target_modules = find_all_linear_names(model)    
+        peft_config = LoraConfig(
+            r=training_args.lora_r,
+            lora_alpha=training_args.lora_alpha,
+            lora_dropout=training_args.lora_dropout,
+            bias=training_args.lora_bias,
+            target_modules=target_modules
+        )
 
-    model = get_peft_model(model, peft_config)
-    # model.print_trainable_parameters()
-
+        model = get_peft_model(model, peft_config)
 
     # train mm_mlp_adapter
     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
@@ -261,40 +219,19 @@ if __name__ == '__main__':
     model.config.mm_projector_lr = training_args.mm_projector_lr
     training_args.use_im_start_end = model_args.mm_use_im_start_end
     model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
-    model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer) ########### tokenizer出问题
+    model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
-
-    #data_args.image_grid_pinpoints = model.config.image_grid_pinpoints
+    data_args.model_version = model_args.version
     train_loader, _ = build_dataloader(data_args, training_args, tokenizer)
     training_args.num_training_steps = training_args.num_train_epochs * len(train_loader)
-
-
-    # import time
-    # for param in model.parameters():
-    #     if param.grad is not None:
-    #         print(type(param))
-    #         time.sleep(100)
-    #         param.grad = param.grad.float()
-    print(1111111)
     
     train(model, train_loader, training_args)
-    # print(model)
-    # print('---------')
-    # for name, module in model.named_modules():
-    #     print(f"模块名称: {name}, 模块类型: {type(module).__name__}")
-
-
-
 
     """
-    autocast自动混合精度训练，适用fp32的模型，forward使用fp16，backward使用fp32
-    如果一个模型一开始就是float16，则不适用，因为前向传播本身就是半精度的
-
-
-    """
-    
-    """
-    nohup /var/lib/anaconda3/envs/llava/bin/python /home/chaofeng/llava_finetune/train_lora.py > /home/chaofeng/llava_finetune/doc/log_lora.log 2>&1 &
+    踩坑:
+        autocast自动混合精度训练，适用fp32的模型，forward使用fp16，backward使用fp32
+        如果一个模型一开始就是float16，则不适用，因为前向传播本身就是半精度的
+        模型很大时，直接model.float()会om
     """
 
 
