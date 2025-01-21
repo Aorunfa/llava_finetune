@@ -1,12 +1,7 @@
 import os
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
-import functools
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-from torchvision import datasets, transforms
-
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -14,25 +9,10 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import (
     CPUOffload,
     BackwardPrefetch,
     ShardingStrategy,
-
-)
-from torch.distributed.fsdp.wrap import (
-    size_based_auto_wrap_policy,
-    enable_wrap,
-    wrap,
-    transformer_auto_wrap_policy,
-    CustomPolicy,
-    
-)
-from functools import partial
+    )
 
 from torch.distributed.fsdp import MixedPrecision
-
-import copy
 from dataclasses import dataclass, field
-import json
-import logging
-import pathlib
 from typing import Dict, Optional, Sequence, List
 import torch
 import transformers
@@ -46,7 +26,6 @@ from train.utils import (
                     prepare_inputs, 
                     print_loss, 
                     save_metric)
-
 
 @dataclass
 class ModelArguments:
@@ -108,8 +87,9 @@ class TrainingArguments(transformers.TrainingArguments):
     group_by_modality_length: bool = field(default=False)
 
     # modified
-    output_dir: str = field(default='/home/chaofeng/llava_finetune/lora-checkpoint')
+    output_dir: str = field(default='/home/chaofeng/llava_finetune/lora-checkpoint3')
     deepspeed: str = '/home/chaofeng/LLaVA/scripts/zero2.json'
+    metric_csv: str = '/home/chaofeng/llava_finetune/doc/train_loss_lora3.csv'
     
     bf16: bool = True
     num_train_epochs: int = 1
@@ -264,26 +244,23 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
                                 recurse: bool, 
                                 nonwrapped_numel: int) -> bool:     
         has_unfrozen_params = all(param.requires_grad for param in module.parameters())
+        # is_big = nonwrapped_numel > 10 * 1024 * 1024
         is_big = nonwrapped_numel > 10 * 1024 * 1024
-        return has_unfrozen_params or is_big
+        return has_unfrozen_params and is_big
 
     lava_fitune_auto_wrap_policy = custom_auto_wrap_policy
     def custom_auto_wrap_policy2(module: nn.Module, 
                                 ) -> bool:
-        # has_unfrozen_params = any(param.requires_grad for param in module.parameters())
         nonwrapped_numel = 0
         requires_grad = []
         for param in module.parameters():
             requires_grad.append(param.requires_grad)
             nonwrapped_numel += param.numel()
-
-
         has_unfrozen_params = all(requires_grad)
+        # is_big = nonwrapped_numel > 10 * 1024 * 1024
         is_big = nonwrapped_numel > 10 * 1024 * 1024
+        return not (has_unfrozen_params and is_big)
 
-        return not has_unfrozen_params and not is_big
-
-    
     ignored_states = [module for name, module in model.named_modules() if custom_auto_wrap_policy2(module)]
     
     model.to(rank)
@@ -291,12 +268,9 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
                  mixed_precision=bfSixteen,
                  auto_wrap_policy=lava_fitune_auto_wrap_policy,
                  device_id=torch.cuda.current_device(),
-                 sharding_strategy=ShardingStrategy.FULL_SHARD, # ShardingStrategy.FULL_SHARD， ShardingStrategy.SHARD_GRAD_OP
-                 use_orig_params=False, # for foreezon trainning                
-                 #ignored_states=[param for param in model.parameters() if not param.requires_grad]
+                 sharding_strategy=ShardingStrategy.SHARD_GRAD_OP, # ShardingStrategy.FULL_SHARD， ShardingStrategy.SHARD_GRAD_OP
+                 use_orig_params=False,                            # for foreezon trainning                
                  ignored_states = ignored_states
-                # limit_all_gathers = True,
-                # ignored_modules=[module for name, module in model.named_modules() if next(module.parameters()).requires_grad]
                  )
     
     ###############################################
@@ -326,10 +300,8 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
                     print_loss(step, loss_item_avg, current_lr)
                 
                     # save csv
-                    data = {'step': step, 'loss_item': ddp_loss[0].item(), 'current_lr': current_lr}
-                    save_metric(data, '/home/chaofeng/llava_finetune/doc/train_loss_lora3.csv')
-                
-                ddp_loss = torch.zeros(2).to(rank)
+                    data = {'step': step, 'loss_item': loss_item_avg, 'current_lr': current_lr}
+                    save_metric(data, training_args.metric_csv)
             lr_scheduler.step()
 
     dist.barrier()
@@ -338,20 +310,24 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
     cleanup()
 
 def save_peft_lora_model(model, training_args):
+    from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+    save_policy = FullStateDictConfig(offload_to_cpu=False, rank0_only=True)
     from train.utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3
-    model.config.use_cache = True
-    # get lora
-    state_dict = get_peft_state_maybe_zero_3(
-                    model.named_parameters(), training_args.lora_bias
-                    )
-    # get no lora, e.g mm_proj_adapter
-    non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
-                    model.named_parameters()
-                    )
-    if training_args.local_rank == 0 or training_args.local_rank == -1:
-        model.config.save_pretrained(training_args.output_dir)
-        model.save_pretrained(training_args.output_dir, state_dict=state_dict)
-        torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
+
+    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+        model.config.use_cache = True
+        # get lora
+        state_dict = get_peft_state_maybe_zero_3(
+                        model.named_parameters(), training_args.lora_bias
+                        )
+        # get no lora, e.g mm_proj_adapter
+        non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
+            model.named_parameters()
+                        )
+        if training_args.local_rank == 0 or training_args.local_rank == -1:
+            model.config.save_pretrained(training_args.output_dir)
+            model.save_pretrained(training_args.output_dir, state_dict=state_dict)
+            torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
 
 def load_peft_lora_model(lora_path, model_path):
     pass
@@ -369,10 +345,7 @@ if __name__ == '__main__':
             nprocs=WORLD_SIZE,
             join=True)
 
-    
-    
 
-    
 
     """
     lora trainning 获取
@@ -389,10 +362,6 @@ if __name__ == '__main__':
         详细讲解：http://shiyanjun.cn/archives/2292.html
         官方教程：https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html#how-to-use-fsdp
     --------- ------------
-    """
-
-    """
-    nohup /var/lib/anaconda3/envs/llava/bin/python /home/chaofeng/llava_finetune/train_lora.py > /home/chaofeng/llava_finetune/doc/log_lora.log 2>&1 &
     """
 
 

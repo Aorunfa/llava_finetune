@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 import copy
 from dataclasses import dataclass, field
 import json
@@ -18,12 +18,13 @@ from train.utils import (
                     prepare_inputs, 
                     print_loss, 
                     save_metric)
+import warnings
+warnings.filterwarnings('ignore')
 
 @dataclass
 class ModelArguments:
-    model_name_or_path: Optional[str] = field(default="/dev/shm/chaofeng/llava-v1.5-7b")
-    version: Optional[str] = field(default="v1") # llava_llama_2, llava_mistral, mistral_instruct
-    ### first llava_llama_2
+    model_name_or_path: Optional[str] = field(default="/dev/shm/chaofeng/llava-v1.6-mistral-7b")
+    version: Optional[str] = field(default="mistral_instruct") # llava_llama_2, llava_mistral, mistral_instruct
     
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=True)
@@ -33,9 +34,8 @@ class ModelArguments:
     mm_projector_type: Optional[str] = field(default='mlp2x_gelu')                     # mm adapter的类型，这里选择多层
     mm_use_im_start_end: bool = field(default=False)
     mm_use_im_patch_token: bool = field(default=False)
-    mm_patch_merge_type: Optional[str] = field(default=None)
+    mm_patch_merge_type: Optional[str] = field(default='spatial_unpad')
     mm_vision_select_feature: Optional[str] = field(default="patch")
-
 
 @dataclass
 class DataArguments:
@@ -44,7 +44,7 @@ class DataArguments:
     lazy_preprocess: bool = True
     is_multimodal: bool = False
     image_folder: Optional[str] = field(default='/dev/shm/chaofeng/LLaVA-CC3M-Pretrain-595K/dataset')
-    image_aspect_ratio: str = 'pad' # 图片处理方式, anyres划分四个象限和中间 一张图会得到五张图
+    image_aspect_ratio: str = 'pad'     # 图片处理方式, anyres划分四个象限和中间 一张图会得到五张图, anyres for v1.6
 
 # transformers.TrainingArguments
 @dataclass
@@ -60,36 +60,27 @@ class TrainingArguments(transformers.TrainingArguments):
         metadata={"help": "Compress the quantization statistics through double quantization."}
     )
     quant_type: str = field(
-        default="nf4",
+        default="fp4",
         metadata={"help": "Quantization data type to use. Should be one of `fp4` or `nf4`."}
     )
     bits: int = field(
-        default=16,
+        default=8,
         metadata={"help": "How many bits to use."}
     )
     
-    # lora config
-    lora_enable: bool = True
-    lora_r: int = 64
-    lora_alpha: int = 16
-    lora_dropout: float = 0.05
-    lora_weight_path: str = ""
-    lora_bias: str = "none"
+    
     mm_projector_lr: Optional[float] = None
-
-    group_by_modality_length: bool = field(default=True)
+    group_by_modality_length: bool = field(default=False)
 
     # modified
-    output_dir: str = field(default='/home/chaofeng/llava_finetune/lora-checkpoint')
-    deepspeed: str = '/home/chaofeng/LLaVA/scripts/zero2.json'
-    metric_csv: str = '/home/chaofeng/llava_finetune/doc/train_loss_lora2_new.csv'
+    output_dir: str = field(default='/home/chaofeng/llava_finetune/lora-checkpoint3')
+    metric_csv: str = '/home/chaofeng/llava_finetune/doc/train_loss_lora_8bit.csv'
     
-    fp16: bool = False
     bf16: bool = True
     num_train_epochs: int = 1
-    per_device_train_batch_size: int = 1
+    per_device_train_batch_size: int = 8
     per_device_eval_batch_size: int = 4
-    gradient_accumulation_steps: int = 128
+    gradient_accumulation_steps: int = 16# 128
     evaluation_strategy: str =  "no"
     save_strategy: str = "steps"
     save_steps: str = 50000
@@ -110,28 +101,22 @@ def train(model, train_loader, training_args:TrainingArguments):
     model.train()
     device = next(model.parameters()).device
     optimizer, lr_scheduler = build_optimizer_scheduler(training_args, model)
-    scaler = GradScaler(enabled=training_args.fp16)
+    scaler = GradScaler(enabled=training_args.bf16)
     loss_item_avg = 0
     for epoch in range(training_args.num_train_epochs):
         for step, batch in enumerate(train_loader):
             #print('step', step)
             step += 1 + epoch * len(train_loader)
+            with autocast('cuda', enabled=training_args.bf16, dtype=torch.bfloat16):
+                batch = prepare_inputs(batch, model)
+                loss = model(**batch, return_dict=True)['loss']
+                loss_item = loss.data.item()
+                loss_item_avg += loss_item
+                print(batch['images'].shape)
 
-            batch = prepare_inputs(batch, model)
-            loss = model(**batch, return_dict=True)['loss']
-            loss_item = loss.data.item()
-            loss_item_avg += loss_item
-
-            # scaler.scale(loss).backward()
             loss.backward()
             if step % training_args.gradient_accumulation_steps == 0:
                 loss_item_avg = loss_item_avg / training_args.gradient_accumulation_steps
-
-                #scaler.unscale_(optimizer)
-                #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)
-                #scaler.step(optimizer)
-                #scaler.update()
-                
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)
                 optimizer.step()
                 optimizer.zero_grad()
@@ -175,24 +160,44 @@ if __name__ == '__main__':
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
     print(local_rank)
-    print('compute_dtype ', compute_dtype)
 
-    # from llava_model.llm.llava_mistral import LlavaMistralForCausalLM
-    from llava_model.llm.llava_llama import LlavaLlamaForCausalLM
+    ## bit train
+    bnb_model_from_pretrained_args = {}
+    if training_args.bits in [4, 8]:
+        from transformers import BitsAndBytesConfig
+        bnb_model_from_pretrained_args.update(dict(
+                    device_map={"": training_args.device},
+                    #load_in_4bit=training_args.bits == 4,
+                    #load_in_8bit=training_args.bits == 8,
+                    quantization_config=BitsAndBytesConfig(
+                        load_in_4bit=training_args.bits == 4,
+                        load_in_8bit=training_args.bits == 8,
+                        llm_int8_skip_modules=["mm_projector"], # no need for bit quan
+                        llm_int8_threshold=6.0,                 # outlier keep for fp16 
+                        llm_int8_has_fp16_weight=False, # False
+                        #bnb_4bit_compute_dtype=compute_dtype,
+                        #bnb_4bit_use_double_quant=training_args.double_quant, # e.g qlora
+                        #bnb_4bit_quant_type=training_args.quant_type # {'fp4', 'nf4'}
+                    )
+                ))
+
+
+    from llava_model.llm.llava_mistral import LlavaMistralForCausalLM
     from llava_model.utils import conversation as conversation_lib
     
     # 模型 
     attn_implementation = None # or 'flash_attention_2'
-    model = LlavaLlamaForCausalLM.from_pretrained(
+    model = LlavaMistralForCausalLM.from_pretrained(
                 pretrained_model_name_or_path=model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 attn_implementation=attn_implementation,
-                torch_dtype=compute_dtype
+                torch_dtype=compute_dtype,
+                **bnb_model_from_pretrained_args
                 )
     model.config.use_cache = False
     
     # NOTE 需要进阶理解这个内容
-    # 每次随机保留一部分中间梯度进行更新，减小显存使用
+    # 梯度回传到输入，用于gradient_checkpointing的训练；gradient_checkpointing每次随机保留一部分中间梯度进行更新，减小显存使用
     if training_args.gradient_checkpointing:
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
@@ -233,29 +238,58 @@ if __name__ == '__main__':
     model.config.tokenizer_model_max_length = tokenizer.model_max_length
 
 
-    # train lora
-    from train.utils import find_all_linear_names
-    target_modules = find_all_linear_names(model)    
-    peft_config = LoraConfig(
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.05,
-        target_modules=target_modules   # suffix
-    )
+    # for name, module in model.named_modules():
+    #     try:
+    #         print(name, 'dt ', next(module.parameters()).dtype)
+    #         print(name, 'dt ', next(module.parameters()).requires_grad)
+    #     except:
+    #         pass
+    
+    
+    
+    if training_args.bits in [4, 8]:
+        from peft import prepare_model_for_kbit_training
+        model.config.torch_dtype= compute_dtype
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing)
+        model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
 
-    model = get_peft_model(model, peft_config)
-    # model.print_trainable_parameters()
+        from peft.tuners.lora import LoraLayer
+        for name, module in model.named_modules():
+            if isinstance(module, LoraLayer):
+                if training_args.bf16:
+                    module = module.to(torch.bfloat16)
 
+            if 'norm' in name:
+                # module = module.to(torch.float32)
+                if training_args.bf16:
+                    module = module.to(torch.bfloat16)
+            
+            if 'lm_head' in name or 'embed_tokens' in name:
+                if hasattr(module, 'weight'):
+                    if training_args.bf16 and module.weight.dtype == torch.float32:
+                        module = module.to(torch.bfloat16)
+    
 
+    
     # train mm_mlp_adapter
     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
     if model_args.tune_mm_mlp_adapter:
-        #model.requires_grad_(False)
+        model.requires_grad_(False)
         for p in model.get_model().mm_projector.parameters():
             p.requires_grad = True
+
     
-    model.print_trainable_parameters()
-    model = model.cuda()
+
+    for name, module in model.named_modules():
+        try:
+            # if next(module.parameters()).dtype is torch.float16 or next(module.parameters()).dtype is torch.float32:
+            #     print(next(module.parameters()).dtype)
+            if next(module.parameters()).dtype is torch.float16 or next(module.parameters()).dtype is torch.float32:
+                print(next(module.parameters()).dtype)
+                print(name, 'dt ', next(module.parameters()).dtype)
+                print(name, 'dt ', next(module.parameters()).requires_grad)
+        except:
+            pass
 
     model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
     model.config.mm_projector_lr = training_args.mm_projector_lr
@@ -268,33 +302,28 @@ if __name__ == '__main__':
     train_loader, _ = build_dataloader(data_args, training_args, tokenizer)
     training_args.num_training_steps = training_args.num_train_epochs * len(train_loader)
 
-
-    # import time
-    # for param in model.parameters():
-    #     if param.grad is not None:
-    #         print(type(param))
-    #         time.sleep(100)
-    #         param.grad = param.grad.float()
-    print(1111111)
-    
     train(model, train_loader, training_args)
-    # print(model)
-    # print('---------')
-    # for name, module in model.named_modules():
-    #     print(f"模块名称: {name}, 模块类型: {type(module).__name__}")
+   
 
-
-
-
-    """
-    autocast自动混合精度训练，适用fp32的模型，forward使用fp16，backward使用fp32
-    如果一个模型一开始就是float16，则不适用，因为前向传播本身就是半精度的
-
-
-    """
     
+
     """
-    nohup /var/lib/anaconda3/envs/llava/bin/python /home/chaofeng/llava_finetune/train_lora.py > /home/chaofeng/llava_finetune/doc/log_lora.log 2>&1 &
+    1/15 任务
+    01 peft-lora模型保存: 单独保存lora训练权重; 加载时候需要merge原始权重与lora权重
+        -- done lora save, lora 加载
+        -- 整理merge脚本
+        -- 
+    02 只训mm_adapter模型加载
+    03 代码规整
+
+
+    lora trainning 获取
+    低bit训练, q-lora 低比特双重量化 -- 感受一下显存占用的变化
+    """
+
+
+    """
+    nohup /var/lib/anaconda3/envs/llava/bin/python /home/chaofeng/llava_finetune/train_bit.py > /home/chaofeng/llava_finetune/doc/log_8bit.log 2>&1 &
     """
 
 

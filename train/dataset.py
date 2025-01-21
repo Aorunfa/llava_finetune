@@ -10,6 +10,9 @@ import copy
 from llava_model.utils.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava_model.utils import conversation as conversation_lib
 from llava_model.utils.mm_utils import tokenizer_image_token
+from llava_model.utils.mm_utils import process_images
+
+conversation_lib.default_conversation = conversation_lib.conv_templates['mistral_instruct']
 
 
 local_rank = None
@@ -19,17 +22,8 @@ def rank0_print(*args):
     if local_rank == 0:
         print(*args)
 
-@dataclass
-class DataArguments:
-    # 通过dataclass修饰自动__init__为内部属性
-    data_path: str = field(default=None,
-                           metadata={"help": "Path to the training data."})
-    lazy_preprocess: bool = False
-    is_multimodal: bool = False
-    image_folder: Optional[str] = field(default=None)
-    image_aspect_ratio: str = 'square'
 
-from llava_model.utils.mm_utils import process_images
+
 
 
 def load_images(image_files):
@@ -45,7 +39,7 @@ class LazySupervisedDataset(Dataset):
 
     def __init__(self, data_path: str,
                  tokenizer: transformers.PreTrainedTokenizer,
-                 data_args: DataArguments):
+                 data_args):
         super(LazySupervisedDataset, self).__init__()
         list_data_dict = json.load(open(data_path, "r"))
 
@@ -192,7 +186,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
 ################################### preprocess
 def preprocess_multimodal(
     sources: Sequence[str],
-    data_args: DataArguments
+    data_args
 ) -> Dict:
     is_multimodal = data_args.is_multimodal
     if not is_multimodal:
@@ -275,7 +269,7 @@ def _add_speaker_and_signal(header, source, get_conversation=True):
 
 def preprocess_multimodal(
     sources: Sequence[str],
-    data_args: DataArguments
+    data_args
 ) -> Dict:
     is_multimodal = data_args.is_multimodal
     if not is_multimodal:
@@ -577,7 +571,7 @@ def preprocess_plain(
 def preprocess(
     sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False
+    has_image: bool = False,
 ) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
@@ -594,6 +588,7 @@ def preprocess(
         return preprocess_v1(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version == "mpt":
         return preprocess_mpt(sources, tokenizer, has_image=has_image)
+    
     # add end signal and concatenate together
     conversations = []
     for source in sources:
