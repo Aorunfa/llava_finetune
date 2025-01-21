@@ -1,3 +1,4 @@
 doc
 infer
 lora-checkpoint*
+*__pycache__
