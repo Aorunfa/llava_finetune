@@ -1,10 +1,11 @@
 # 持续整理中，代码源自于原仓库[LLaVA](https://github.com/haotian-liu/LLaVA)
 # llava_finetune
-一个用于llava-v1.5-7b微调的仓库，主要用途:
+一个用于llava-v1.5-7b和llava-v1.6-mistral-7b微调的仓库，主要用途:
 
-理解算法设计，vison_encoder, mm_adaper, llm如何组合
+00 理解算法设计，vison_encoder, mm_adaper, llm如何组合
 
 01 实战 deepspeed + transformer的分布式训练
+
 
 02 实战 peft库支持的loar微调、lora模型加载、lora模型合并过程
 

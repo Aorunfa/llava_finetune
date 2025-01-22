@@ -244,7 +244,7 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
             requires_grad.append(param.requires_grad)
             nonwrapped_numel += param.numel()
         has_unfrozen_params = all(requires_grad)
-        is_large = nonwrapped_numel > 2 * 1024 * 1024    
+        is_large = nonwrapped_numel > 2 * 1024 * 1024   # bigger need more mem    
         return is_large or has_unfrozen_params
 
     def custom_auto_wrap_policy_reverse(module: nn.Module) -> bool:

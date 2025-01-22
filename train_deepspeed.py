@@ -1,14 +1,8 @@
-import os
-import copy
 from dataclasses import dataclass, field
-import json
-import logging
-import pathlib
-from typing import Dict, Optional, Sequence, List
+from typing import Optional
 import torch
 import transformers
-import tokenizers
-
+import os
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="/dev/shm/chaofeng/llava-v1.6-mistral-7b")
@@ -96,7 +90,45 @@ class TrainingArguments(transformers.TrainingArguments):
     gradient_checkpointing: bool = True
     dataloader_num_workers: int = 4
     
-    
+
+
+def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
+                                   output_dir: str):
+    """Collects the state dict and dump to disk."""
+    from train.utils import get_mm_adapter_state_maybe_zero_3
+    if getattr(trainer.args, "tune_mm_mlp_adapter", False):
+        # Only save Adapter
+        keys_to_match = ['mm_projector']
+        if getattr(trainer.args, "use_im_start_end", False):
+            keys_to_match.extend(['embed_tokens', 'embed_in'])
+
+        weight_to_save = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
+        trainer.model.config.save_pretrained(output_dir)
+
+        current_folder = output_dir.split('/')[-1]
+        parent_folder = os.path.dirname(output_dir)
+        if trainer.args.local_rank == 0 or trainer.args.local_rank == -1:
+            if current_folder.startswith('checkpoint-'):
+                mm_projector_folder = os.path.join(parent_folder, "mm_projector")
+                os.makedirs(mm_projector_folder, exist_ok=True)
+                torch.save(weight_to_save, os.path.join(mm_projector_folder, f'{current_folder}.bin'))
+            else:
+                torch.save(weight_to_save, os.path.join(output_dir, f'mm_projector.bin'))
+        return
+
+    if trainer.deepspeed:
+        torch.cuda.synchronize()
+        trainer.save_model(output_dir)
+        return
+
+    state_dict = trainer.model.state_dict()
+    if trainer.args.should_save:
+        cpu_state_dict = {
+            key: value.cpu()
+            for key, value in state_dict.items()
+        }
+        del state_dict
+        trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
 if __name__ == '__main__':
     parser = transformers.HfArgumentParser(
@@ -106,8 +138,8 @@ if __name__ == '__main__':
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
     print(local_rank)
 
-    from llava_model.llm.llava_mistral import LlavaMistralForCausalLM
-    from llava_model.utils import conversation as conversation_lib
+    from llava.llm.llava_mistral import LlavaMistralForCausalLM
+    from llava.utils import conversation as conversation_lib
     # 模型加载
     attn_implementation = None
     model = LlavaMistralForCausalLM.from_pretrained(
@@ -133,12 +165,8 @@ if __name__ == '__main__':
             padding_side="right",
             use_fast=False,
         )
-    
     tokenizer.pad_token = tokenizer.unk_token
-    if model_args.version in conversation_lib.conv_templates:
-        conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
-    else:
-        conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
+    
     # load clip encoder
     model.get_model().initialize_vision_modules(
         model_args=model_args,
@@ -155,14 +183,13 @@ if __name__ == '__main__':
     model.config.tokenizer_padding_side = tokenizer.padding_side
     model.config.tokenizer_model_max_length = tokenizer.model_max_length
 
-    # 只训练mm mlp projecter
+    # only train mm mlp projecter
     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
     if model_args.tune_mm_mlp_adapter:
         model.requires_grad_(False)
         for p in model.get_model().mm_projector.parameters():
             p.requires_grad = True
     
-    # 冻结mlp preojector
     model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter
     if training_args.freeze_mm_mlp_adapter:
         for p in model.get_model().mm_projector.parameters():
@@ -174,26 +201,33 @@ if __name__ == '__main__':
     model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
     model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
-    # build trian dataset, collect_fun, val dataset
+    # build dist dataloader
     from train.dataset import make_supervised_data_module
+    data_args.model_version = model_args.version
+    data_args.image_grid_pinpoints = model.config.image_grid_pinpoints    
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
 
     # transformer trainer fit
     from train.llava_trainer import LLaVATrainer
+    import pathlib
+    
     trainer = LLaVATrainer(model=model, args=training_args, tokenizer=tokenizer, **data_module)
     trainer.train()
 
+    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+        trainer.train(resume_from_checkpoint=True)
+    else:
+        trainer.train()
+    trainer.save_state()
+
+    model.config.use_cache = True
+
+
+    safe_save_model_for_hf_trainer(trainer=trainer,
+                                   output_dir=training_args.output_dir)
+    
     """
     deepspeed train_full_ft.py --deepspeed /home/chaofeng/LLaVA/scripts/zero2.json
-    """
-
-    """
-    模型加载
-    数据加载
-    损失函数: 自带smoth crocess entropy损失计算
-    训练:
-        使用transformer自带训练基类进行训练， 可以使用deepspeed
-        自己撕一版torch原生的训练方式
     """
 
 
