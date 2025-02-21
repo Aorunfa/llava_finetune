@@ -170,16 +170,16 @@ if __name__ == '__main__':
                         quantization_config=BitsAndBytesConfig(
                             ## 8bit config
                             # load_in_8bit=training_args.bits == 8,
-                            # llm_int8_skip_modules=["mm_projector"], # no need for bit quan
-                            # llm_int8_threshold=6.0,                 # find outlier weight keep for fp16 
+                            # llm_int8_skip_modules=["mm_projector"],               # no need for bit quan
+                            # llm_int8_threshold=6.0,                               # find outlier weight keep for fp16 
                             # llm_int8_has_fp16_weight=False,
                             
                             ## 4bit config
-                            llm_int8_skip_modules=["mm_projector"],
                             load_in_4bit=training_args.bits == 4,
-                            bnb_4bit_compute_dtype=compute_dtype,
+                            llm_int4_skip_modules=["mm_projector"],
+                            bnb_4bit_compute_dtype=compute_dtype,                   # 反量化计算数值类型
                             bnb_4bit_use_double_quant=training_args.double_quant,
-                            bnb_4bit_quant_type=training_args.quant_type # {'fp4', 'nf4'}
+                            bnb_4bit_quant_type=training_args.quant_type            # {'fp4', 'nf4'}
                         )
                     ))
     
