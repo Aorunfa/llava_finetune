@@ -173,6 +173,12 @@ if __name__ == '__main__':
                             # llm_int8_skip_modules=["mm_projector"],               # no need for bit quan
                             # llm_int8_threshold=6.0,                               # find outlier weight keep for fp16 
                             # llm_int8_has_fp16_weight=False,
+                            # bnb_8bit_quant_type
+                            # bnb_8bit_compute_dtype
+                            # bnb_8bit_use_double_quant
+                            # llm_int8_enable_fp32_cpu_offload
+
+
                             
                             ## 4bit config
                             load_in_4bit=training_args.bits == 4,
@@ -194,6 +200,7 @@ if __name__ == '__main__':
                 )
     model.config.use_cache = False # for training
     
+
     # tokenizer
     tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,

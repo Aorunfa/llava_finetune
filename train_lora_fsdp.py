@@ -266,7 +266,7 @@ def train_fsdp(rank, world_size, model_args, training_args, data_args):
                  auto_wrap_policy= custom_auto_wrap_policy,
                  device_id=torch.cuda.current_device(),
                  sharding_strategy=ShardingStrategy.FULL_SHARD, # ShardingStrategy.FULL_SHARD， ShardingStrategy.SHARD_GRAD_OP
-                 use_orig_params=False,                         # for foreezon trainning if fsdp mixed required_grad=Trua and False                
+                 use_orig_params=False,                         # 冻结训练时需要打开                
                  ignored_states=ignored_states,
                  # backward_prefetch = BackwardPrefetch.BACKWARD_PRE
                  )

@@ -109,12 +109,15 @@ if training_args.lora_enable:
 
 量化的另一种方式是使用chunck内的数值分布，对应高斯分布，量化参数取分位数，缩放参数为对应的高斯分布分位数对应的数值
 
-
 反量化的简单原理，e.g fp8反量化为fp16：W_dequant = W * W.s，存储为fp16精度
 
 *使用triton编写量化内核的实战，可以参照我对deepseekV3推理代码的解读[deepseek_learning](https://github.com/Aorunfa/deepseek_learning)*
 
 基于上述，低bit微调，只需要指定量化的存储类型，特别地，对于一些敏感的层，可以不进行量化操作。使用transformer和peft进行设置
+
+bnb_4bit_quant_type选择fp4则采用均匀分布的量化方式，nf4采用高斯分布的量化方式。   
+
+fp4计算更高效, nf4计算精度更高，高斯分布更符合权重参数的分布
 
 ```python
 # bit trainning config
@@ -127,33 +130,64 @@ if training_args.bits in [4, 8]:
                     # load_in_8bit=training_args.bits == 8,
                     # llm_int8_skip_modules=["mm_projector"],    
                     # llm_int8_threshold=6.0,                       # find outlier weight keep for fp16 
-                    # llm_int8_has_fp16_weight=False,
+                    # llm_int8_has_fp16_weight=True,                # find outlier weight keep for fp16 
+                    # bnb_8bit_quant_type
+                    # bnb_8bit_compute_dtype
+                    # bnb_8bit_use_double_quant
+                    # llm_int8_enable_fp32_cpu_offload
                     
                     ## 4bit config
                     load_in_4bit=training_args.bits == 4,
-                    llm_int4_skip_modules=["mm_projector"],          # 不需要量化的层，敏感层
-                    bnb_4bit_compute_dtype=compute_dtype,            # 反量化恢复的数值类型
-                    bnb_4bit_use_double_quant=training_args.double_quant,
-                    bnb_4bit_quant_type=training_args.quant_type     # {'fp4', 'nf4'}
+                    llm_int4_skip_modules=["mm_projector"],                 # 不需要量化的层，敏感层
+                    bnb_4bit_compute_dtype=compute_dtype,                   # 反量化恢复的数值类型
+                    bnb_4bit_use_double_quant=training_args.double_quant,   # 启用双重量化，e.g qlora
+                    bnb_4bit_quant_type=training_args.quant_type            # {'fp4', 'nf4'} 
                 )
             ))
 ```
 
+其他详细见训练脚本`train_qlora.py`
 
 ### 04 fsdp训练: 模型分片，模型保存
+fsdp是传统数据并行ddp的优化，翻译为全量共享的数据并行，首先需要理解ddp的原理才能理解fsdp的改进
 
-* ddp: 数据并行， 模型、梯度、优化器状态在同一个gpu上，优化器状态分布在主节点更新同步套所有节点。特点速度更快 但单卡峰值的显存依赖更大
+ddp将模型、梯度、优化器全部在同一个gpu上，主节点更新优化器和梯度后同步所有节点。特点是通信少，速度更快，但单卡峰值的显存依赖更大，更适合小模型的训练
 
-* fsdp: 将模型、梯度、优化器进行分片(gups个unit，每个unit含有模型、梯度、优化器的一个module的一个片段)
-    - 举例将一个module参数等分为gpus个分片分布在每个fsdpunit中
-    - forward fsdp unit 从其他rank中获取层的其他参数，恢复完整后每forward，结果传递给下一个unit
-    - backward fsdp unit 从其他rank中获取层的其他参数，恢复完整后每forward，梯度分片保存，梯度函数传递给上一个unit
-    - 特点：速度慢一些，但是单卡峰值显存依赖小
-    - 当前后分片为多进程的方式工作，即上一节点不用完全等待下一节点处理完，此时可以实现模型(分片)并行的效果
-    - * 详细讲解：http://shiyanjun.cn/archives/2292.html
-    - * 官方教程：https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html#how-to-use-fsdp
+fsdp将模型层、对应梯度和优化器进行分片。对于需要分片的层，划分为gup数量个units，每个unit含有模型层、对应梯度和优化器的一个片段。相当与把层分散到各个gup上，降低了单个gpu的峰值，牺牲一定的通信时间。具体的操作过程如下。
+
+- 将一个module参数等分为gpu数量个分片，形成fsdp的unit，每个unit含有对应的参数梯度和优化器的状态
+- 前向传播，fsdp unit 从其他rank中获取层的其他参数，恢复完整参数进行forward，后销毁，结果向下传递
+- 反向传播，同样恢复完整层进行borward，只是保留自己的梯度，梯度函数向上传递
+- 当前unit可以同时执行计算和通信
+- * 详细讲解：http://shiyanjun.cn/archives/2292.html
+- * 官方教程：https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html#how-to-use-fsdp
+
+pytorch原生支持fsdp的训练，只需要定义分片策略，启动训练脚本即可
+```python
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+bfSixteen = MixedPrecision(                                  # 定义每个过程计算精度
+                param_dtype=torch.bfloat16,
+                buffer_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+                )   
+model = FSDP(model,
+             mixed_precision=bfSixteen,
+             auto_wrap_policy= custom_auto_wrap_policy,     # 自定义的分片策略，详细查看pytorch支持文档
+             device_id=torch.cuda.current_device(),
+             sharding_strategy=ShardingStrategy.FULL_SHARD, # ShardingStrategy.FULL_SHARD    完全分片
+                                                            # ShardingStrategy.SHARD_GRAD_OP 梯度和优化器分片
+             use_orig_params=False,                         # 冻结训练时需要打开                              
+             ignored_states=ignored_states,                 # 自定义不需要分片的参数
+             backward_prefetch = BackwardPrefetch.BACKWARD_PRE  
+                                                        # 反向传播计算是否预存下一组参数，pre计算前预取，显存增长
+            )
+
+```
+
+其他详细见训练脚本`train_lora_fsdp.py`
 
 ### 05 accelerate分布式训练加速
+ongoing...
 
 
 
