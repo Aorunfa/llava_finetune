@@ -30,8 +30,8 @@ except:
 
 
 
-def load_pretrained_model(model_path, # lora or pretrain dir?
-                          model_base, # pretrain dir if set lora model in model_path
+def load_pretrained_model(model_path, # lora or pretrain dir
+                          model_base, # pretrained dir if set lora model in model_path
                           model_name, 
                           load_8bit=False, 
                           load_4bit=False, 
@@ -59,6 +59,7 @@ def load_pretrained_model(model_path, # lora or pretrain dir?
 
     if use_flash_attn:
         kwargs['attn_implementation'] = 'flash_attention_2'
+
 
     if 'llava' in model_name.lower():
         # Load LLaVA model
