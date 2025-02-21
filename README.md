@@ -1,4 +1,3 @@
-# 持续整理中，codebase源自于原仓库[LLaVA](https://github.com/haotian-liu/LLaVA)
 # llava_finetune
 一个用于llava-v1.5-7b和llava-v1.6-mistral-7b微调的仓库，理解llava模型设计细节
 
@@ -34,7 +33,10 @@ llava更新了三个版本v1、v1.5、v1.6。整体结构为使用vit作为vison
 
 ## 微调
 具备clip和transformer库的基础，对llava的代码比较容易理解，主要使用了transformer库的封装。  
+
 同时，为了方便快速理解微调原理，在每个微调方法上，会简要说明方法原理，并说明需要注意的细节。
+
+codebase源自于原仓库[LLaVA](https://github.com/haotian-liu/LLaVA)
 
 ### 01 deepspeed + transformer的分布式训练
 transformer库的训练器和模型框架原生支持deepseed的分布式训练。这里只需要理解deepseed的分片策略，设置相应的配置文件即可快速进行大模型的训练。分片策略层级越高，显存节省越大，但通信时间越长，简单介绍如下  
