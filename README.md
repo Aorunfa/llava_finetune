@@ -3,18 +3,24 @@
 一个用于llava-v1.5-7b和llava-v1.6-mistral-7b微调的仓库，理解llava模型设计细节
 
 # 模型结构设计
-llava更新了三个版本v1、v1.5、v1.6。整体结构为使用vit作为vison-encoder，权重初始化自clip，使用预训练的llama作为text decoder，中间设置一个adapter，将vison token对齐到text token的embedding向量空间。  
+llava更新了三个版本v1、v1.5、v1.6。整体结构为使用vit作为vison-encoder，权重初始化自clip，使用预训练的llama作为text decoder，中间设置一个adapter，将vison token对齐到text token的embedding向量空间。 
+
 在vison token featuer 前后增加特殊的图片开始和结束标志位，和text token完成特征拼接。
-llava的优势在于，使用的训练数据极少，完整的训练时间非常短，8A100一天完成训练
+
+*llava的优势在于，使用的训练数据极少，完整的训练时间非常短，8A100一天完成训练*
 
 <div align="center">
   <img src="doc/llava.png" alt="lora" width="718" height="240">
   <p style="font-size: 10px; color: gray;">llava arch</p>
 </div>
 
-> **llava-v1**的adapter设置为一个简单的投影矩阵（单linear层）完成对齐，输入图像分辨率为224。训练包括两个阶段，全程冻结vison encoder，第一阶段只训练adapter，完成模态对齐。第二阶段训练adaper和llm，完成指令微调。
+> **llava-v1**
+> * adapter设置为一个简单的投影矩阵（单linear层）完成对齐，输入图像分辨率为224。
+> * 训练包括两个阶段，全程冻结vison encoder，第一阶段只训练adapter，完成模态对齐。第二阶段训练adaper和llm，完成指令微调。
 
-> **llava-1.5**的adaptr设置为一个两层的MLP层完成对齐，vison encoder使用更大的clip vit模型，输入图像分辨率为336，同时prompt中设定短答案输出的格式，提高短输出benchmark的准确度
+> **llava-1.5**
+> * adaptr设置为一个两层的MLP层完成对齐，vison encoder使用更大的clip vit模型，输入图像分辨率为336
+> * 同时prompt中设定短答案输出的格式，提高短输出benchmark的准确度
 
 
 <div align="center">
@@ -22,15 +28,16 @@ llava的优势在于，使用的训练数据极少，完整的训练时间非常
   <p style="font-size: 10px; color: gray;">llava-1.6 patch process</p>
 </div>
 
-> **llava-1.6**从源码看来，是对论文中llava-1.5=HD的实现。使用224分辨力的clip作为vision encoder。对高分辨率的图片resize并padding到预设高分辨率，将图片等分为四个区域加上一张原始resize图片(224的分辨率)，分布进行encoder后完成拼接，得到token featuer
-
+> **llava-1.6**
+> * 从源码看来，是对论文中llava-1.5-HD的实现。使用224分辨力的clip作为vision encoder。
+> * 对高分辨率的图片resize并padding到预设高分辨率，将图片等分为四个区域加上一张原始resize图片(224的分辨率)，分别进行encoder后完成拼接，得到vison token
 
 ## 微调
 具备clip和transformer库的基础，对llava的代码比较容易理解，主要使用了transformer库的封装。  
 同时，为了方便快速理解微调原理，在每个微调方法上，会简要说明方法原理，并说明需要注意的细节。
 
 ### 01 deepspeed + transformer的分布式训练
-transformer库的训练器和模型框架原生支持deepseed的分布式训练。这里只需要理解deepseed的分片策略，设置相应的配置文件即可快速进行大模型的训练。分片策略层级越高，显存节省越大，但通信时间越大，简单介绍如下  
+transformer库的训练器和模型框架原生支持deepseed的分布式训练。这里只需要理解deepseed的分片策略，设置相应的配置文件即可快速进行大模型的训练。分片策略层级越高，显存节省越大，但通信时间越长，简单介绍如下  
 
 ```python
 """
@@ -57,19 +64,19 @@ transformer库的训练器和模型框架原生支持deepseed的分布式训练�
 * 启动训练命令
 
 ### 02 peft实现loar微调
-lora微调是大模型最常用的微调手段，本质是对linear层进行调整，但不直接对linear层进行训练，而是使用类似残差连接并控制训练参数自由度的方式进行训练，基本公式为如下
+lora微调是大模型最常用的微调手段，本质是对linear层进行调整，但不直接对其进行训练，而是使用类似残差连接并控制训练参数自由度的方式进行训练，基本公式为如下
 
 <div align="center">
-  <img src="doc/lora.png" alt="lora" width="110" height="17">
+  <img src="doc/lora.png" alt="lora" width="180" height="24">
   <p style="font-size: 10px; color: gray;">lora fuc</p>
 </div>
 
-linear层参数是一个shape为(in_feature, out_feature)的参数矩阵(先不考虑bias)，表示为W0。A和B是一个低秩矩阵，A的shape为(in_feature, r)，B的shape为(r, out_feature)。
+* linear层参数是一个shape为(in_feature, out_feature)的参数矩阵(先不考虑bias)，表示为W0。
+* A的shape为(in_feature, r)的矩阵，B是shape为(r, out_feature)的矩阵。设定r远小于out_feature，A和B为低秩矩阵，r越大，AB的参数的自由度越高。
+* α是lora_alpha，用于缩放低秩矩阵的增量，平衡每一次参数更新对原参数W0的影响
+* "+"的方式类似残差连接的结构，保证原始模型效果不退化太大
 
-
-α
-α是lora_alpha，用于缩放低秩矩阵的增量。
-r 是低秩矩阵的秩。
+基于上述
 
 ### 03 peft实现低bit微调
 低bit量化
