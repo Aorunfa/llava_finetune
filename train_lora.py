@@ -204,6 +204,7 @@ if __name__ == '__main__':
         )
 
         model = get_peft_model(model, peft_config)
+    
 
     # train mm_mlp_adapter
     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter

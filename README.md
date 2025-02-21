@@ -59,7 +59,7 @@ transformer库的训练器和模型框架原生支持deepseed的分布式训练�
 """
 ```
 
-使用方法: 见```tain_deepseed.py```
+训练脚本见```train_deepseed.py```
 * 将分片策略参数定义在zero.json文件
 * 启动训练命令
 
@@ -68,18 +68,40 @@ lora微调是大模型最常用的微调手段，本质是对linear层进行调�
 
 <div align="center">
   <img src="doc/lora.png" alt="lora" width="280" height="40">
-  <p style="font-size: 10px; color: gray;">lora fuc</p>
+  <p style="font-size: 10px; color: gray;">lora func</p>
 </div>
 
 * linear层参数是一个shape为(in_feature, out_feature)的参数矩阵(先不考虑bias)，表示为W0。
-* A的shape为(in_feature, r)的矩阵，B是shape为(r, out_feature)的矩阵。设定r远小于out_feature，A和B为低秩矩阵，r越大，AB的参数的自由度越高。
+* A是shape为(in_feature, r)的矩阵，B是shape为(r, out_feature)的矩阵。设定r远小于out_feature，A和B为低秩矩阵，r越大，AB的参数的自由度越高。
 * α是lora_alpha，用于缩放低秩矩阵的增量，平衡每一次参数更新对原参数W0的影响
 * "+"的方式类似残差连接的结构，保证原始模型效果不退化太大
 
-基于上述
+基于上述可以知道lora微调首先需要指定哪些linear层，然后设定r和α超参数，最后直接调用peft进行微调即可  
+训练脚本见```train_lora.py```
+
+```python
+# train lora config
+if training_args.lora_enable:
+    from train.utils import find_all_linear_names   # 自定义微调linear层
+    target_modules = find_all_linear_names(model)    
+    peft_config = LoraConfig(
+        r=training_args.lora_r,                     # r
+        lora_alpha=training_args.lora_alpha,        # α
+        lora_dropout=training_args.lora_dropout,    # 对AB进行随机dropout比例
+        bias=training_args.lora_bias,               # A和B对应的linear层是否设置对应的bias
+        target_modules=target_modules
+    )
+    model = get_peft_model(model, peft_config)      
+```
+
+最后，只需要搞清楚lora微调的模型如何进行保存与加载 --- todo
+> lora只需要保存A和B层参数权重
+> 加载可以通过peft修饰过的模型，通过
 
 ### 03 peft实现低bit微调
 低bit量化
+
+
 
 
 
