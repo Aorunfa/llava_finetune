@@ -68,7 +68,6 @@ lora微调是大模型最常用的微调手段，本质是对linear层进行调�
 
 <div align="center">
   <img src="doc/lora.png" alt="lora" width="280" height="40">
-  <p style="font-size: 10px; color: gray;">lora func</p>
 </div>
 
 * linear层参数是一个shape为(in_feature, out_feature)的参数矩阵(先不考虑bias)，表示为W0。
