@@ -67,7 +67,7 @@ transformer库的训练器和模型框架原生支持deepseed的分布式训练�
 lora微调是大模型最常用的微调手段，本质是对linear层进行调整，但不直接对其进行训练，而是使用类似残差连接并控制训练参数自由度的方式进行训练，基本公式为如下
 
 <div align="center">
-  <img src="doc/lora.png" alt="lora" width="180" height="24">
+  <img src="doc/lora.png" alt="lora" width="280" height="40">
   <p style="font-size: 10px; color: gray;">lora fuc</p>
 </div>
 
