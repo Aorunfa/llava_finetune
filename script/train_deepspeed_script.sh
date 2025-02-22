@@ -7,5 +7,5 @@ export NCCL_IB_DISABLE="1"
 export WANDB_DISABLED='true'
 
 
-deepspeed train_ds.py \
-    --deepspeed /home/chaofeng/LLaVA/scripts/zero2.json
+deepspeed train_deepspeed.py \
+    --deepspeed script/zero2.json

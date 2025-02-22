@@ -6,7 +6,7 @@ llava更新了三个版本v1、v1.5、v1.6。整体结构为使用vit作为vison
 
 在vison token featuer 前后增加特殊的图片开始和结束标志位，和text token完成特征拼接。
 
-*llava的优势在于，使用的训练数据极少，完整的训练时间非常短，8A100一天完成训练*
+**llava的优势在于，使用的训练数据极少，完整的训练时间非常短，8×A100一天完成训练**
 
 <div align="center">
   <img src="doc/llava.png" alt="lora" width="718" height="240">
@@ -63,7 +63,7 @@ transformer库的训练器和模型框架原生支持deepseed的分布式训练�
 
 训练脚本见```train_deepseed.py```
 * 将分片策略参数定义在zero.json文件
-* 启动训练命令
+* 启动训练命令```cd llava_finetune/ | bash script/train_deepspeed_script.sh```
 
 ### 02 peft实现loar微调
 lora微调是大模型最常用的微调手段，本质是对linear层进行调整，但不直接对其进行训练，而是使用类似残差连接并控制训练参数自由度的方式进行训练，基本公式为如下
