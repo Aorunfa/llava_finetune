@@ -2,3 +2,4 @@ infer
 lora-checkpoint*
 __pycache__
 debug.ipynb
+result

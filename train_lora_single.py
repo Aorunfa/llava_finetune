@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 from dataclasses import dataclass, field
 from typing import Optional
 import torch
@@ -15,29 +15,28 @@ from train.utils import (
 
 @dataclass
 class ModelArguments:
-    model_name_or_path: Optional[str] = field(default="/dev/shm/chaofeng/llava-v1.5-7b")
+    model_name_or_path: Optional[str] = field(default="/local/dev1/chaofeng/llava-v1.5-7b")
     version: Optional[str] = field(default="v1")
-    
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=True)
-    vision_tower: Optional[str] = field(default='openai/clip-vit-large-patch14-336')   # clip 图片编码器
-    mm_vision_select_layer: Optional[int] = field(default=-2)                          # 选择clip第几层特征进行返回
+    vision_tower: Optional[str] = field(default='/local/dev1/chaofeng/clip-vit-large-patch14-336')   # clip 图片编码器
+    mm_vision_select_layer: Optional[int] = field(default=-2)                                        # 选择clip第几层特征进行返回，最佳实验原则
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)                   
-    mm_projector_type: Optional[str] = field(default='mlp2x_gelu')                     # mm adapter的类型，这里选择多层
+    mm_projector_type: Optional[str] = field(default='mlp2x_gelu')                                    # mm adapter的类型，这里选择多层
     mm_use_im_start_end: bool = field(default=False)
     mm_use_im_patch_token: bool = field(default=False)
-    mm_patch_merge_type: Optional[str] = field(default=None)
+    mm_patch_merge_type: Optional[str] = field(default='flat')
     mm_vision_select_feature: Optional[str] = field(default="patch")
 
 
 @dataclass
 class DataArguments:
-    data_path: str = field(default='/dev/shm/chaofeng/LLaVA-CC3M-Pretrain-595K/chat.json',
+    data_path: str = field(default='/local/dev1/chaofeng/LLaVA-CC3M-Pretrain-595K/chat.json',
                            metadata={"help": "Path to the training data."})
     lazy_preprocess: bool = True
     is_multimodal: bool = False
-    image_folder: Optional[str] = field(default='/dev/shm/chaofeng/LLaVA-CC3M-Pretrain-595K/dataset')
-    image_aspect_ratio: str = 'pad'                 # 图片处理方式, anyres划分四个象限和中间 一张图会得到五张图, anyres v1.6改进
+    image_folder: Optional[str] = field(default='/local/dev1/chaofeng/LLaVA-CC3M-Pretrain-595K/images')
+    image_aspect_ratio: str = 'pad'                                                    # 图片处理方式, anyres划分四个象限和中间 一张图会得到五张图, anyres v1.6改进
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -59,8 +58,8 @@ class TrainingArguments(transformers.TrainingArguments):
     group_by_modality_length: bool = field(default=True)
 
     # modified
-    output_dir: str = field(default='/home/chaofeng/llava_finetune/lora-checkpoint')
-    metric_csv: str = '/home/chaofeng/llava_finetune/doc/train_loss_lora2_new.csv'
+    output_dir: str = field(default='/home/chaofeng/workhome/chaofeng/llava_finetune/result')
+    metric_csv: str = '/home/chaofeng/workhome/chaofeng/llava_finetune/result/train_loss.csv'
     
     fp16: bool = False
     bf16: bool = True
@@ -72,7 +71,7 @@ class TrainingArguments(transformers.TrainingArguments):
     save_strategy: str = "steps"
     save_steps: str = 50000
     save_total_limit: str = 1
-    learning_rate: float = 1e-5
+    learning_rate: float = 2e-6
     weight_decay: float = 0.
     warmup_ratio: float = 0.03
     lr_scheduler_type: str =  "cosine"  
@@ -111,7 +110,8 @@ def train(model, train_loader, training_args:TrainingArguments):
                 loss_item_avg = 0
 
             lr_scheduler.step()
-
+            save_peft_lora_model(model, training_args)
+            return 
 
     save_peft_lora_model(model, training_args)
 
@@ -131,8 +131,98 @@ def save_peft_lora_model(model, training_args):
         model.save_pretrained(training_args.output_dir, state_dict=state_dict)
         torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
 
-def load_peft_lora_model(lora_path, model_path):
-    pass
+
+def load_peft_lora__model(model_path,         # lora or pretrain dir
+                          model_base,         # pretrained dir if set lora model in model_path
+                          model_merge_path=None,
+                          load_8bit=False, 
+                          load_4bit=False, 
+                          device_map="auto", # 多gpu时指定模型如何在设备上进行分片
+                          device="cuda", 
+                          use_flash_attn=False, 
+                          **kwargs):
+    from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
+    from llava.utils.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+    from llava.llm import LlavaConfig, LlavaLlamaForCausalLM
+
+    kwargs = {"device_map": device_map, **kwargs}
+
+    if device != "cuda":
+        kwargs['device_map'] = {"": device}
+
+    if load_8bit:
+        kwargs['load_in_8bit'] = True
+    elif load_4bit:
+        kwargs['load_in_4bit'] = True
+        kwargs['quantization_config'] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type='nf4'
+        )
+    else:
+        kwargs['torch_dtype'] = torch.float16
+
+    if use_flash_attn:
+        kwargs['attn_implementation'] = 'flash_attention_2'
+
+    
+    #from llm_llama import LlavaConfig
+    lora_cfg_pretrained = LlavaConfig.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
+    print('Loading LLaVA from base model...')
+    model = LlavaLlamaForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs) # lora_cfg_pretrained should same as base
+    token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
+    #adjust ouputhead an embeddig matrix
+    if model.lm_head.weight.shape[0] != token_num:
+        model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
+        model.model.embed_tokens.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
+
+    print('Loading additional LLaVA weights...')
+    none_lora_path = os.path.join(model_path, 'non_lora_trainables.bin')
+    if os.path.exists(none_lora_path):
+        non_lora_trainables = torch.load(none_lora_path, map_location='cpu')
+        non_lora_trainables = {(k[11:] if k.startswith('base_model.') else k): v for k, v in non_lora_trainables.items()}
+        if any(k.startswith('model.model.') for k in non_lora_trainables):
+            non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
+        model.load_state_dict(non_lora_trainables, strict=False)
+
+    # peft load lora state dict
+    from peft import PeftModel
+    print('Loading LoRA weights...')
+    model = PeftModel.from_pretrained(model, model_path)
+    print('Merging LoRA weights...')
+    model = model.merge_and_unload()
+    print('Model is loaded...')
+
+
+    mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
+    mm_use_im_patch_token = getattr(model.config, "mm_use_im_patch_token", True)
+    if mm_use_im_patch_token:
+        tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
+    if mm_use_im_start_end:
+        tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
+    model.resize_token_embeddings(len(tokenizer))
+
+    vision_tower = model.get_vision_tower()
+    if not vision_tower.is_loaded:
+        vision_tower.load_model(device_map=device_map)
+    if device_map != 'auto':
+        vision_tower.to(device=device_map, dtype=torch.float16)
+    image_processor = vision_tower.image_processor
+
+    if hasattr(model.config, "max_sequence_length"):
+        context_len = model.config.max_sequence_length
+    else:
+        context_len = 2048
+    
+    if model_merge_path is not None:
+        model.save_pretrained(model_merge_path)
+        tokenizer.save_pretrained(model_merge_path)
+        return
+
+
+    return tokenizer, model, image_processor, context_len
 
 if __name__ == '__main__':
     """
@@ -228,14 +318,25 @@ if __name__ == '__main__':
     
     train(model, train_loader, training_args)
 
+
+    # merge
+    load_peft_lora__model(model_path='/home/chaofeng/workhome/chaofeng/llava_finetune/result',
+                          model_base='/local/dev1/chaofeng/llava-v1.5-7b',
+                          model_merge_path='/home/chaofeng/workhome/chaofeng/llava_finetune/lora_ckpt')
+
+    
+    
     """
     踩坑:
-        autocast自动混合精度训练，适用fp32的模型，forward使用fp16，backward使用fp32
+        autocast自动只适用混合精度训练，适用fp32的模型，forward使用fp16，backward使用fp32
         如果一个模型一开始就是float16，则不适用，因为前向传播本身就是半精度的
-        模型很大时，直接model.float()会om
+        模型很大时，直接model.float()会OM
+
+        batchsize很小时候，gradient_accumulation应设置大一些，减小梯度更新的随机性，随机性大很难收敛
+
     """
 
-
-
-
-
+    """
+    
+     https://github.com/Dao-AILab/flash-attention/releases/download/v2.1.1/flash_attn-2.1.1+cu124torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+    """

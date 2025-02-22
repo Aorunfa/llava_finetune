@@ -78,7 +78,7 @@ lora微调是大模型最常用的微调手段，本质是对linear层进行调�
 * "+"的方式类似残差连接的结构，保证原始模型效果不退化太大
 
 基于上述可以知道lora微调首先需要指定哪些linear层，然后设定r和α超参数，最后直接调用peft进行微调即可  
-训练脚本见```train_lora.py```
+训练脚本见```train_lora_single.py```
 
 ```python
 # train lora config
@@ -95,9 +95,12 @@ if training_args.lora_enable:
     model = get_peft_model(model, peft_config)      
 ```
 
-最后，只需要搞清楚lora微调的模型如何进行保存与加载 --- todo
-> lora只需要保存A和B层参数权重
-> 加载...
+最后，只需要搞清楚lora微调的模型如何进行保存与加载
+> 训练过程只需要保存lora层和非冻结层参数权重，见save_peft_lora_model函数
+> 加载预训练模型后，通过peft的PeftModel类加载lora权重，加载其他非冻结层权重
+> 通过.save_pretrained方法merg为一个权重，见load_peft_lora__model
+
+基于train_lora_single.py写了一版ddp的训练脚本，见train_lora_ddp.py
 
 ### 03 peft实现低bit微调
 低bit微调原理是对模型参数和激活值进行量化，量化参数使用更低精度的数值类型，e.g fp32-->fp8 存储32bit-->8bit，增加反量化恢复的计算开销，但约成倍降低显存。注意激活值需要存储用于反向传播的梯度计算。
@@ -148,7 +151,7 @@ if training_args.bits in [4, 8]:
             ))
 ```
 
-其他详细见训练脚本`train_qlora.py`
+其他详细见训练脚本`train_qlora_single.py`
 
 ### 04 fsdp训练: 模型分片，模型保存
 fsdp是传统数据并行ddp的优化，翻译为全量共享的数据并行，首先需要理解ddp的原理才能理解fsdp的改进
