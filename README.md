@@ -184,7 +184,7 @@ model = FSDP(model,
              use_orig_params=False,                         # 冻结训练时需要打开                              
              ignored_states=ignored_states,                 # 自定义不需要分片的参数
              backward_prefetch = BackwardPrefetch.BACKWARD_PRE  
-                                                        # 反向传播计算是否预存下一组参数，pre计算前预取，显存增长
+                                                            # 反向传播计算是否预存下一组参数，pre计算前预取，显存增长
             )
 
 ```
