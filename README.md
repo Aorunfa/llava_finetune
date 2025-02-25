@@ -2,15 +2,14 @@
 一个用于llava-v1.5-7b和llava-v1.6-mistral-7b微调的仓库，理解llava模型设计细节
 
 # 模型结构设计
-llava更新了三个版本v1、v1.5、v1.6。整体结构为使用vit作为vison-encoder，权重初始化自clip，使用预训练的llama作为text decoder，中间设置一个adapter，将vison token对齐到text token的embedding向量空间。 
-
-在vison token featuer 前后增加特殊的图片开始和结束标志位，和text token完成特征拼接。
+llava更新了三个版本v1、v1.5、v1.6。整体结构为使用vit作为vison-encoder，权重初始化自clip，使用预训练的llama作为text decoder，中间设置一个adapter，将vison token对齐到text token的embedding向量空间。   
+在vison token featuer 前后增加特殊的图片开始和结束标志位，和text token完成特征拼接。   
 
 **llava的优势在于，使用的训练数据极少，完整的训练时间非常短，8×A100一天完成训练**
 
 <div align="center">
   <img src="doc/llava.png" alt="lora" width="718" height="240">
-  <p style="font-size: 10px; color: gray;">llava arch</p>
+  <p style="font-size: 10px; color: gray;">llava 结构</p>
 </div>
 
 > **llava-v1**
@@ -19,7 +18,7 @@ llava更新了三个版本v1、v1.5、v1.6。整体结构为使用vit作为vison
 
 > **llava-1.5**
 > * adaptr设置为一个两层的MLP层完成对齐，vison encoder使用更大的clip vit模型，输入图像分辨率为336
-> * 同时prompt中设定短答案输出的格式，提高短输出benchmark的准确度
+> * 同时prompt中设定短答案输出的格式，增加固定尾缀，提高短输出benchmark的准确度。
 
 
 <div align="center">
@@ -33,10 +32,12 @@ llava更新了三个版本v1、v1.5、v1.6。整体结构为使用vit作为vison
 
 ## 微调
 具备clip和transformer库的基础，对llava的代码比较容易理解，主要使用了transformer库的封装。  
+同时，为了方便快速理解微调原理，在每个微调方法上，会简要说明方法原理，并说明需要注意的细节，codebase源自于原仓库[LLaVA](https://github.com/haotian-liu/LLaVA)
 
-同时，为了方便快速理解微调原理，在每个微调方法上，会简要说明方法原理，并说明需要注意的细节。
+### 00 数据和模型准备
+数据使用llava微调数据集[LLaVA-CC3M-Pretrain-595K](https://huggingface.co/datasets/liuhaotian/LLaVA-CC3M-Pretrain-595K)，下载并解压到对应目录下，修改对应train.py的DataArguments的图片路径和索引json文件路径
 
-codebase源自于原仓库[LLaVA](https://github.com/haotian-liu/LLaVA)
+模型使用llava-v1.6-mistral-7b进行微调[link](https://huggingface.co/liuhaotian/llava-v1.6-mistral-7b)，下载后对应修改ModelArguments里面的model_name_or_path为对应的模型路径
 
 ### 01 deepspeed + transformer的分布式训练
 transformer库的训练器和模型框架原生支持deepseed的分布式训练。这里只需要理解deepseed的分片策略，设置相应的配置文件即可快速进行大模型的训练。分片策略层级越高，显存节省越大，但通信时间越长，简单介绍如下  
@@ -193,6 +194,8 @@ model = FSDP(model,
 
 ### 05 accelerate分布式训练加速
 ongoing...
+
+### 推理脚本见`llava_finetune/infer.py`, 具体参数设置见原仓库
 
 
 

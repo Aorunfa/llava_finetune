@@ -1,43 +1,11 @@
-
-# from llava_model.builder_llm import load_pretrained_model
-# model_path = "/dev/shm/chaofeng/llava-v1.6-mistral-7b"
-# model_base = "/home/chaofeng/llava_finetune/ckpt"
-# model_name = model_path.split("/")[-1]
-# # tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, 
-# #                                                                        model_base=None, #model_base, 
-# #                                                                        model_name=model_name)
-
-# # 简单处理加载方式
-# from transformers import AutoTokenizer, AutoModelForCausalLM
-# import torch
-# from peft import PeftModel
-# tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
-# model = AutoModelForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True)
-# print(f"Loading LoRA weights from {model_base}")
-# model = PeftModel.from_pretrained(model, model_base)
-# print(f"Merging weights")
-# model = model.merge_and_unload()
-# print('Convert to FP16...')
-# model.to(torch.float16)
-
-################
-import argparse
 import torch
-import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 from PIL import Image
 import requests
 from PIL import Image
 from io import BytesIO
 import re
-import threading
 import copy
-import queue
-import pandas as pd
-import numpy as np
-
-# os.environ['CUDA_VISIBLE_DEVICES'] = '3'
-from llava_model.utils.constants import(
+from llava.utils.constants import(
     IMAGE_TOKEN_INDEX,
     DEFAULT_IMAGE_TOKEN,
     DEFAULT_IM_START_TOKEN,
@@ -45,10 +13,10 @@ from llava_model.utils.constants import(
     IMAGE_PLACEHOLDER,
 )
 
-from llava_model.utils.conversation import conv_templates, SeparatorStyle
-from llava_model.builder_llm import load_pretrained_model
-from llava_model.utils.utils import disable_torch_init
-from llava_model.utils.mm_utils import (
+from llava.utils.conversation import conv_templates
+from llava.builder_llm import load_pretrained_model
+from llava.utils.utils import disable_torch_init
+from llava.utils.mm_utils import (
     process_images,
     tokenizer_image_token,
     get_model_name_from_path,
@@ -142,55 +110,19 @@ def infer(args, images_path, device):
     conv.append_message(conv.roles[1], None)
     prompt = conv.get_prompt()
 
-    # input_ids = (
-    #     tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-    #     .unsqueeze(0)
-    #     .cuda()
-    # )
-    #### get input ids
+    #get input ids
     input_ids = (
         tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
         .unsqueeze(0)
         .to(model.device)
     )
 
-    # from transformers import AutoTokenizer, AutoModelForCausalLM
-    # import torch
-    # from peft import PeftModel
-    # tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
-    # model_lora = AutoModelForCausalLM.from_pretrained(args.model_path, low_cpu_mem_usage=True)
-    # model_base = '/home/chaofeng/llava_finetune/ckpt'
-    # print(f"Loading LoRA weights from {model_base}")
-    # model_lora = PeftModel.from_pretrained(model_lora, model_base)
-    # print(f"Merging weights")
-    # model_lora = model_lora.merge_and_unload()
-    # print('Convert to FP16...')
-    # model_lora.to('cuda:1')
-    # model_lora.to(torch.float16)
-
-
     # model.config.image_aspect_ratio = 'pad'
     
     data = read_input(images_path, image_processor, model.config)
-    # images_tensor = data['images_tensor'].to(model.device, dtype=torch.float16)
     images_tensor = data['images_tensor'].to(model.device, dtype=torch.float16)
-    
-    # import time
-    # print('111111', images_tensor.shape)
-    # time.sleep(3)
-    
     image_sizes = data['image_sizes']
     image_path = data['image_path']
-
-    #image_files = image_parser(args)
-    #images = load_images(image_files)
-    # image_sizes = [x.size for x in images]
-    # images_tensor = process_images(
-    #     images,
-    #     image_processor,
-    #     model.config
-    # ).to(model.device, dtype=torch.float16)
-
     log('star -- %s' % image_path)
     with torch.inference_mode():
             output_ids = model.generate(
@@ -204,31 +136,22 @@ def infer(args, images_path, device):
                 max_new_tokens=args.max_new_tokens,
                 use_cache=True,
             )
-
     outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+    log('end -- %s' % image_path)
     return outputs
     
 
 
 
 if __name__ == "__main__":
-    ##### 预训练模型单卡推理 ###########
-    ckpt = '/dev/shm/chaofeng/llava-v1.6-mistral-7b'
-    image_file = '/home/chaofeng/BLIP/test.png'
-    image_file = '/morph-chaofeng/stock/real/ice-2799109_1280.png'
-    #qurey = 'describe this picture shortly.'
-    # qurey = 'caption this image'
-    # qurey = 'describe main information of the image as shortly as possible'
-    # qurey = 'caption the main information of the image'
-    
-    #qurey = 'describe main information so shortly'
-    #qurey = "What is in this image?, the answer should be limitted less than 20 words"
+    import argparse
+    ckpt = '/local/dev1/chaofeng/llava-v1.5-7b'
     qurey = "What is in this image?, the answer should starts with 'The image shows' and should less than 15 words"
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, default=ckpt)
     parser.add_argument("--model-base", type=str, default=None)
-    parser.add_argument("--image-file", type=str, default=image_file)
+    # parser.add_argument("--image-file", type=str, default=image_file)
     parser.add_argument("--query", type=str, default=qurey)
     parser.add_argument("--conv-mode", type=str, default=None)
     parser.add_argument("--sep", type=str, default=",")
@@ -239,52 +162,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
 
-    ### 单卡单个推理
-    image_path = '/home/chaofeng/LLaVA/images/llava_v1_5_radar.jpg'
+    # 单卡推理    
+    image_path = 'llava_finetune/doc/test.png'
     device = 'cuda:0'
-    log_path = '/home/chaofeng/LLaVA/self/test/l.log'
     res = infer(args, image_path, device)
     print(res)
-
-
-
-    # #### 加载lora模型
-    # from llava_model.builder_llm import load_pretrained_model
-    # model_path = "/home/chaofeng/llava_finetune/lora-checkpoint"
-    # model_base = "/dev/shm/chaofeng/llava-v1.6-mistral-7b"
-    # model_name = 'lora_' + 'llava-v1.6-mistral-7b' 
-    # tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, 
-    #                                                                        model_base=model_base, 
-    #                                                                        model_name=model_name)
-
-
-
-    # from transformers import AutoTokenizer, AutoModelForCausalLM
-    # import torch
-    # from peft import PeftModel
-    # tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
-    # model_lora = AutoModelForCausalLM.from_pretrained(args.model_path, low_cpu_mem_usage=True)
-    # model_base = '/home/chaofeng/llava_finetune/ckpt'
-    # print(f"Loading LoRA weights from {model_base}")
-    # model_lora = PeftModel.from_pretrained(model_lora, model_base)
-    # print(f"Merging weights")
-    # model_lora = model_lora.merge_and_unload()
-    # print('Convert to FP16...')
-    # model_lora.to('cuda:1')
-    # model_lora.to(torch.float16)
-
-
-
-
-
-
-    """
-    prompt
-    "[INST] <image>\nWhat is in this image?, the answer should starts with 'The image shows' and should less than 15 words [/INST]"
-    
-    input_ids
-    tensor([[    1,   733, 16289, 28793, 28705,  -200, 28705,    13,  3195,   349,
-           297,   456,  3469, 24542,   272,  4372,  1023,  8383,   395,   464,
-          1014,  3469,  4370, 28742,   304,  1023,  2108,   821, 28705, 28740,
-         28782,  3085,   733, 28748, 16289, 28793]], device='cuda:0')
-    """

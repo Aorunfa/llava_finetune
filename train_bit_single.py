@@ -144,7 +144,7 @@ def load_peft_lora_model(lora_path, model_path):
 if __name__ == '__main__':
     """
     使用8/4bit量化微调llava-v1.6-mistral-7b, 只训mm_mlp_adapter
-    v1.6使用’image_aspect_ratio=anyres‘ 提取图片上下左右和中间的crop，得到五张图片
+    v1.6设置超参数`image_aspect_ratio=anyres`提取图片上下左右和中间的crop, 得到五张图片 分别喂入vision encoder提取token feature
     """
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
